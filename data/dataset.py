@@ -83,6 +83,7 @@ class FloodEventDataset(Dataset):
         lf_static_edge_features = self._get_lf_static_edge_features()
         hf_geom = self._get_hf_geometry()
         hf_static_node_features = self._get_hf_static_node_features()
+        hf_static_edge_features = self._get_hf_static_edge_features()
         
         save_path = os.path.join(self.processed_dir, self.STATIC_FEATURES_FILE)
         np.savez(save_path,
@@ -92,9 +93,10 @@ class FloodEventDataset(Dataset):
                  lf_static_edge_features = lf_static_edge_features,
                  hf_coords = hf_geom['cell_coordinates'],
                  hf_edge_index = hf_geom['edge_index'],
-                 hf_static_node_features = hf_static_node_features)
+                 hf_static_node_features = hf_static_node_features,
+                 hf_static_edge_features = hf_static_edge_features)
         print(f'Saved constant values to {save_path}')
-        del lf_geom, lf_static_node_features, lf_static_edge_features, hf_geom, hf_static_node_features
+        del lf_geom, lf_static_node_features, lf_static_edge_features, hf_geom, hf_static_node_features, hf_static_edge_features
 
         # ----- create dynamic files -----
         for i, event_id in enumerate(self.event_ids):
@@ -129,24 +131,32 @@ class FloodEventDataset(Dataset):
             f"Error: timestep {timestep_in_event} out of bounds for event with {self.num_timesteps[event_idx]} timesteps."
 
         # load static data
-        static_features = np.load(self.STATIC_FEATURES_PATH)
+        static_features = np.load(self.STATIC_FEATURES_PATH, mmap_mode='r')
+        lf_coords = static_features['lf_coords']
         lf_edge_index = static_features['lf_edge_index']
         lf_static_node_features = static_features['lf_static_node_features']
         lf_static_edge_features = static_features['lf_static_edge_features']
+        hf_coords = static_features['hf_coords']
         hf_edge_index = static_features['hf_edge_index']
+        hf_static_node_features = static_features['hf_static_node_features']
+        hf_static_edge_features = static_features['hf_static_edge_features']
 
         # load dynamic data
-        dynamic_values = np.load(self.DYNAMIC_FEATURES_PATHS[event_idx])
+        dynamic_values = np.load(self.DYNAMIC_FEATURES_PATHS[event_idx], mmap_mode='r')
         lf_dynamic_node_features = dynamic_values['lf_dynamic_node_features'][timestep_in_event]
         hf_residual_targets = dynamic_values['hf_residual_targets'][timestep_in_event]
 
         data = Data(
+            lf_coords = torch.from_numpy(lf_coords),
             lf_edge_index = torch.from_numpy(lf_edge_index),
             lf_static_node_features = torch.from_numpy(lf_static_node_features),
             lf_static_edge_features = torch.from_numpy(lf_static_edge_features),
-            lf_dynamic_node_features = torch.from_numpy(lf_dynamic_node_features),
+            lf_dynamic_node_features = torch.from_numpy(lf_dynamic_node_features).unsqueeze(-1),
+            hf_coords = torch.from_numpy(hf_coords).float(),
             hf_edge_index = torch.from_numpy(hf_edge_index),
-            hf_residual_targets = torch.from_numpy(hf_residual_targets)
+            hf_static_node_features = torch.from_numpy(hf_static_node_features).float(),
+            hf_static_edge_features = torch.from_numpy(hf_static_edge_features).float(),
+            hf_residual_targets = torch.from_numpy(hf_residual_targets).unsqueeze(-1).float() # [N_hf, 1]
         )
         
         return data
@@ -157,7 +167,7 @@ class FloodEventDataset(Dataset):
         return self.num_timesteps[event_idx]
 
     def _get_lf_geometry(self):
-        return np.load(self.lf_geometry_path)
+        return np.load(self.lf_geometry_path, mmap_mode='r')
 
     def _get_lf_coords(self):
         lf_geom = self._get_lf_geometry()
@@ -196,8 +206,18 @@ class FloodEventDataset(Dataset):
         static_edge_features = np.array([lf_edge_lengths]).transpose()
         return static_edge_features
 
+    def _get_hf_static_edge_features(self):
+        hf_geom = self._get_hf_geometry()
+        hf_coords = hf_geom['cell_coordinates']
+        hf_edge_index = hf_geom['edge_index']
+        n1_coords, n2_coords = hf_coords[hf_edge_index[0]], hf_coords[hf_edge_index[1]]
+        hf_edge_lengths = np.linalg.norm(n1_coords - n2_coords, axis = 1)
+
+        static_edge_features = np.array([hf_edge_lengths]).transpose()
+        return static_edge_features
+
     def _get_lf_dynamic_node_features(self, event_idx: int):
-        print(f'Getting LF dynamic node features for event {event_idx}.')
+        print(f'Getting LF dynamic node features for event index {event_idx}.')
         lf_path = self.lf_hecras_paths[event_idx]
 
         # get ghost cell indices to filter out, assumed to be consistent across runs
@@ -217,7 +237,7 @@ class FloodEventDataset(Dataset):
         return lf_water_depth
 
     def _get_hf_geometry(self):
-        return np.load(self.hf_geometry_path)
+        return np.load(self.hf_geometry_path, mmap_mode='r')
 
     def _get_hf_coords(self):
         hf_geom = self._get_hf_geometry()
@@ -228,7 +248,7 @@ class FloodEventDataset(Dataset):
         return hf_geom['edge_index']
 
     def _get_hf_water_depth_npz(self, event_idx: int):
-        print(f'Getting HF water depth from npz for event {event_idx}.')
+        print(f'Getting HF water depth from npz for event index {event_idx}.')
         # expects npz to be preprocessed to remove ghost cells
         hf_path = self.hf_paths[event_idx]
         hf_data = np.load(hf_path)
@@ -239,7 +259,7 @@ class FloodEventDataset(Dataset):
         return hf_water_depth
 
     def _get_hf_water_depth_hecras(self, event_idx: int):
-        print(f'Getting HF water depth from hdf for event {event_idx}.')
+        print(f'Getting HF water depth from hdf for event index {event_idx}.')
         hf_path = self.hf_paths[event_idx]
 
         # get ghost cell indices to filter out
@@ -252,7 +272,7 @@ class FloodEventDataset(Dataset):
         return hf_water_depth
 
     def _get_hf_residual_targets(self, event_idx: int):
-        print(f'Getting HF residual targets for event {event_idx}.')
+        print(f'Getting HF residual targets for event index {event_idx}.')
         # get lf water surface and upscale
         lf_path = self.lf_hecras_paths[event_idx]
 
