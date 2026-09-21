@@ -9,6 +9,16 @@ from scipy.spatial import KDTree
 from torch_geometric.data import Data, Dataset
 
 
+class MultiResolutionData(Data):
+    def __inc__(self, key, value, *args, **kwargs):
+        if key == 'lf_edge_index':
+            return int(self.lf_num_nodes)
+        elif key == 'hf_edge_index':
+            return int(self.hf_num_nodes)
+        else:
+            return super().__inc__(key, value, *args, **kwargs)
+
+
 class FloodEventDataset(Dataset):
     """
     Static lf node features: area, elevation, roughness
@@ -163,7 +173,7 @@ class FloodEventDataset(Dataset):
         hf_residual_targets = torch.from_numpy(hf_residual_targets).float().unsqueeze(-1)
         hf_wet_mask = torch.from_numpy(hf_wet_mask).bool().unsqueeze(-1)
 
-        data = Data(
+        data = MultiResolutionData(
             lf_x = lf_x,
             lf_coords = lf_coords,
             lf_edge_index = lf_edge_index,
@@ -173,7 +183,12 @@ class FloodEventDataset(Dataset):
             hf_edge_index = hf_edge_index,
             hf_edge_attr = hf_edge_attr,
             hf_residual_targets = hf_residual_targets, # [N_hf, 1]
-            hf_wet_mask = hf_wet_mask
+            hf_wet_mask = hf_wet_mask,
+
+            # for PyG
+            num_nodes = hf_x.size(0),
+            lf_num_nodes = lf_x.size(0),
+            hf_num_nodes = hf_x.size(0)
         )
         
         return data

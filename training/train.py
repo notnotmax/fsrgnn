@@ -5,11 +5,11 @@ import torch
 import torch.nn as nn
 
 from data.dataset import FloodEventDataset
-from data.hecras_data_retrieval import get_event_timesteps
 from model.fsrgnn import FSRGNN
-from torch.utils.data import DataLoader, Subset
+from torch.utils.data import Subset
 from torch.optim import AdamW
 from torch.optim.lr_scheduler import ReduceLROnPlateau
+from torch_geometric.loader import DataLoader
 
 def make_carlisle_dataset(validation_group):
 
@@ -97,6 +97,7 @@ def train():
     val_loader = DataLoader(val_dataset, batch_size=1, shuffle=False)
 
     # ---------- make model ----------
+    print('Creating model...')
     model = FSRGNN(
             lf_static_node_features = 3,
             lf_dynamic_node_features = 1,
@@ -118,6 +119,7 @@ def train():
     loss_func = nn.MSELoss(reduction='none') # no reduction to allow for wet masking
 
     # ---------- training/validation loops ----------
+    print('Starting training...')
     best_val_loss = float('inf')
 
     for epoch in range(1, NUM_EPOCHS + 1):

@@ -92,9 +92,9 @@ class FSRGNN(Module):
 
         # no edge decoder because we are only interested in node-level regression
 
-    def forward(self, x: Tensor, lf_coords: Tensor, lf_edge_index: Tensor, lf_edge_attr: Tensor,
-        hf_coords: Tensor, hf_edge_index: Tensor, hf_edge_attr: Tensor) -> Tensor:
-        x_lf = self.node_encoder(x)
+    def forward(self, lf_x: Tensor, lf_coords: Tensor, lf_edge_index: Tensor, lf_edge_attr: Tensor,
+        hf_x: Tensor, hf_coords: Tensor, hf_edge_index: Tensor, hf_edge_attr: Tensor) -> Tensor:
+        x_lf = self.node_encoder(lf_x)
         e_lf = self.edge_encoder(lf_edge_attr)
 
         x_lf, _ = self.lfgnn(x_lf, lf_edge_index, e_lf) # ignore edge features because they are not used in upscaling
