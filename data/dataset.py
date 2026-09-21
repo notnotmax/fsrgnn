@@ -102,17 +102,19 @@ class FloodEventDataset(Dataset):
         for i, event_id in enumerate(self.event_ids):
             lf_dynamic_node_features = self._get_lf_dynamic_node_features(i)
             hf_residual_targets = self._get_hf_residual_targets(i)
+            hf_wet_masks = self._get_hf_wet_masks(i)
 
             save_path = os.path.join(self.processed_dir, self.DYNAMIC_FEATURES_FILES[i])
 
             np.savez(save_path,
                      lf_dynamic_node_features = lf_dynamic_node_features,
-                     hf_residual_targets = hf_residual_targets)
+                     hf_residual_targets = hf_residual_targets,
+                     hf_wet_masks = hf_wet_masks)
             print(f'Saved dynamic values for event {event_id} to {save_path}')
             del lf_dynamic_node_features, hf_residual_targets
 
     def len(self):
-        return len(self.processed_file_names)
+        return sum(self.num_timesteps)
 
     def get(self, idx):
 
@@ -145,18 +147,33 @@ class FloodEventDataset(Dataset):
         dynamic_values = np.load(self.DYNAMIC_FEATURES_PATHS[event_idx], mmap_mode='r')
         lf_dynamic_node_features = dynamic_values['lf_dynamic_node_features'][timestep_in_event]
         hf_residual_targets = dynamic_values['hf_residual_targets'][timestep_in_event]
+        hf_wet_mask = dynamic_values['hf_wet_masks'][timestep_in_event]
+
+        # torchify
+        lf_static_node_features = torch.from_numpy(lf_static_node_features).float()
+        lf_dynamic_node_features = torch.from_numpy(lf_dynamic_node_features).float().unsqueeze(-1)
+        lf_x = torch.cat([lf_static_node_features, lf_dynamic_node_features], dim=-1)
+        lf_coords = torch.from_numpy(lf_coords).float()
+        lf_edge_index = torch.from_numpy(lf_edge_index)
+        lf_edge_attr = torch.from_numpy(lf_static_edge_features).float()
+        hf_x = torch.from_numpy(hf_static_node_features).float()
+        hf_coords = torch.from_numpy(hf_coords).float()
+        hf_edge_index = torch.from_numpy(hf_edge_index)
+        hf_edge_attr = torch.from_numpy(hf_static_edge_features).float()
+        hf_residual_targets = torch.from_numpy(hf_residual_targets).float().unsqueeze(-1)
+        hf_wet_mask = torch.from_numpy(hf_wet_mask).bool().unsqueeze(-1)
 
         data = Data(
-            lf_coords = torch.from_numpy(lf_coords),
-            lf_edge_index = torch.from_numpy(lf_edge_index),
-            lf_static_node_features = torch.from_numpy(lf_static_node_features),
-            lf_static_edge_features = torch.from_numpy(lf_static_edge_features),
-            lf_dynamic_node_features = torch.from_numpy(lf_dynamic_node_features).unsqueeze(-1),
-            hf_coords = torch.from_numpy(hf_coords).float(),
-            hf_edge_index = torch.from_numpy(hf_edge_index),
-            hf_static_node_features = torch.from_numpy(hf_static_node_features).float(),
-            hf_static_edge_features = torch.from_numpy(hf_static_edge_features).float(),
-            hf_residual_targets = torch.from_numpy(hf_residual_targets).unsqueeze(-1).float() # [N_hf, 1]
+            lf_x = lf_x,
+            lf_coords = lf_coords,
+            lf_edge_index = lf_edge_index,
+            lf_edge_attr = lf_edge_attr,
+            hf_x = hf_x,
+            hf_coords = hf_coords,
+            hf_edge_index = hf_edge_index,
+            hf_edge_attr = hf_edge_attr,
+            hf_residual_targets = hf_residual_targets, # [N_hf, 1]
+            hf_wet_mask = hf_wet_mask
         )
         
         return data
@@ -314,3 +331,11 @@ class FloodEventDataset(Dataset):
         target_residual = hf_water_depth - upscaled_water_depth
 
         return target_residual
+
+    def _get_hf_wet_masks(self, event_idx: int, wet_threshold=0.03):
+        if self.hf_filetype == 'npz':
+            hf_water_depth = self._get_hf_water_depth_npz(event_idx)
+        elif self.hf_filetype == 'hdf':
+            hf_water_depth = self._get_hf_water_depth_hecras(event_idx)
+        return hf_water_depth > wet_threshold
+    
