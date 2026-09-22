@@ -77,18 +77,18 @@ def make_carlisle_dataset(validation_group):
 
 def train():
     DEVICE = torch.device('cuda')
-    NUM_EPOCHS = 1 # TODO make this bigger
-    LEARNING_RATE = 1e-3
+    NUM_EPOCHS = 50 # TODO make this bigger
+    LEARNING_RATE = 1e-4
     VAL_GROUP = 1
     CHECKPOINT_DIR = 'model/Carlisle'
 
-    print("Training on Carlisle.")
+    print(f"Training on Carlisle, leaving out group {VAL_GROUP}.")
 
     os.makedirs(CHECKPOINT_DIR, exist_ok=True)
 
     # ---------- prep datasets/loaders ----------
     dataset = make_carlisle_dataset(validation_group=VAL_GROUP)
-    ttsplit = np.load('../dataset/Carlisle/Train_test_split_data/Train_test_split_ValidateOnGrp_1.npz', mmap_mode='r')
+    ttsplit = np.load(f'../dataset/Carlisle/Train_test_split_data/Train_test_split_ValidateOnGrp_{VAL_GROUP}.npz', mmap_mode='r')
     idx_train = ttsplit['idx_train']
     idx_val = ttsplit['idx_test']
     train_dataset = Subset(dataset, idx_train)
@@ -121,6 +121,11 @@ def train():
     # ---------- training/validation loops ----------
     print('Starting training...')
     best_val_loss = float('inf')
+    loss_stats = {
+        'epoch': [],
+        'train_loss': [],
+        'val_loss': []
+    }
 
     for epoch in range(1, NUM_EPOCHS + 1):
         # training loop
@@ -178,10 +183,16 @@ def train():
         scheduler.step(avg_val_loss)
         print(f'Epoch {epoch}, Train loss {avg_train_loss:.6f}, Validation loss {avg_val_loss:.6f}')
 
+        loss_stats['epoch'].append(epoch)
+        loss_stats['train_loss'].append(avg_train_loss)
+        loss_stats['val_loss'].append(avg_val_loss)
+        with open('loss_stats.json', 'w') as f:
+            json.dump(loss_stats, f, indent=4)
+
         # model checkpointing
         if avg_val_loss < best_val_loss:
             best_val_loss = avg_val_loss
-            torch.save(model.state_dict(), os.path.join(CHECKPOINT_DIR, 'Validation_{VAL_GROUP}.pt'))
+            torch.save(model.state_dict(), os.path.join(CHECKPOINT_DIR, f'Validation_{VAL_GROUP}.pt'))
             print(f'Saved new model checkpoint at epoch {epoch}.')
 
 def masked_loss(y, y_pred, wet_mask, loss_func):
@@ -191,6 +202,45 @@ def masked_loss(y, y_pred, wet_mask, loss_func):
     if wet_loss.numel() == 0:
         return y_pred.sum() * 0.0
     return wet_loss.mean()
+
+def debug():
+    DEVICE = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+    print('making dataset')
+    dataset = make_carlisle_dataset(1)
+    print('making dataloader')
+    loader = DataLoader(dataset, batch_size=1, shuffle=False)
+    print('making model')
+    model = FSRGNN(
+            lf_static_node_features = 3,
+            lf_dynamic_node_features = 1,
+            lf_static_edge_features = 1,
+            hf_static_node_features = 2, # no mannings
+            hf_static_edge_features = 1,
+            hidden_features = 32, # 64
+            output_features = 1,
+            encoder_layers = 2,
+            lfgnn_layers = 1,
+            lfgnn_mlp_layers = 2,
+            hfgnn_layers = 1,
+            hfgnn_mlp_layers = 2,
+            decoder_layers = 2
+        ).to(DEVICE)
+    print('performing inference')
+    for batch in loader:
+        batch = batch.to(DEVICE)
+        y_pred = model(
+            lf_x = batch.lf_x,
+            lf_coords = batch.lf_coords,
+            lf_edge_index = batch.lf_edge_index,
+            lf_edge_attr = batch.lf_edge_attr,
+            hf_x = batch.hf_x,
+            hf_coords = batch.hf_coords,
+            hf_edge_index = batch.hf_edge_index,
+            hf_edge_attr = batch.hf_edge_attr
+        )
+        break
+    print('testing done')
+
 
 if __name__ == '__main__':
     train()

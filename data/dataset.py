@@ -69,6 +69,38 @@ class FloodEventDataset(Dataset):
 
         super().__init__(self.root, transform = None, pre_transform = None, pre_filter = None)
 
+        # post-process call one-time loading of static features to reduce loading from disk
+        static_features = np.load(self.STATIC_FEATURES_PATH, mmap_mode='r')
+
+        self.lf_coords = torch.from_numpy(static_features['lf_coords']).float()
+        self.lf_edge_index = torch.from_numpy(static_features['lf_edge_index']).long()
+        self.lf_static_node_features = torch.from_numpy(static_features['lf_static_node_features']).float()
+        self.lf_static_edge_features = torch.from_numpy(static_features['lf_static_edge_features']).float()
+
+        self.hf_coords = torch.from_numpy(static_features['hf_coords']).float()
+        self.hf_edge_index = torch.from_numpy(static_features['hf_edge_index']).long()
+        self.hf_static_node_features = torch.from_numpy(static_features['hf_static_node_features']).float()
+        self.hf_static_edge_features = torch.from_numpy(static_features['hf_static_edge_features']).float()
+
+        # normalise static features, assuming they never change across timesteps and between train/test splits
+        EPS = 1e-8
+
+        lf_node_mean = self.lf_static_node_features.mean(dim=0, keepdim=True)
+        lf_node_std = self.lf_static_node_features.std(dim=0, keepdim=True)
+        self.lf_static_node_features = (self.lf_static_node_features - lf_node_mean) / (lf_node_std + EPS)
+
+        lf_edge_mean = self.lf_static_edge_features.mean(dim=0, keepdim=True)
+        lf_edge_std = self.lf_static_edge_features.std(dim=0, keepdim=True)
+        self.lf_static_edge_features = (self.lf_static_edge_features - lf_edge_mean) / (lf_edge_std + EPS)
+
+        hf_node_mean = self.hf_static_node_features.mean(dim=0, keepdim=True)
+        hf_node_std = self.hf_static_node_features.std(dim=0, keepdim=True)
+        self.hf_static_node_features = (self.hf_static_node_features - hf_node_mean) / (hf_node_std + EPS)
+
+        hf_edge_mean = self.hf_static_edge_features.mean(dim=0, keepdim=True)
+        hf_edge_std = self.hf_static_edge_features.std(dim=0, keepdim=True)
+        self.hf_static_edge_features = (self.hf_static_edge_features - hf_edge_mean) / (hf_edge_std + EPS)
+
     @property
     def raw_file_names(self):
         # pass filepaths into the constructor
@@ -142,46 +174,27 @@ class FloodEventDataset(Dataset):
         assert 0 <= timestep_in_event < self.num_timesteps[event_idx], \
             f"Error: timestep {timestep_in_event} out of bounds for event with {self.num_timesteps[event_idx]} timesteps."
 
-        # load static data
-        static_features = np.load(self.STATIC_FEATURES_PATH, mmap_mode='r')
-        lf_coords = static_features['lf_coords']
-        lf_edge_index = static_features['lf_edge_index']
-        lf_static_node_features = static_features['lf_static_node_features']
-        lf_static_edge_features = static_features['lf_static_edge_features']
-        hf_coords = static_features['hf_coords']
-        hf_edge_index = static_features['hf_edge_index']
-        hf_static_node_features = static_features['hf_static_node_features']
-        hf_static_edge_features = static_features['hf_static_edge_features']
-
         # load dynamic data
         dynamic_values = np.load(self.DYNAMIC_FEATURES_PATHS[event_idx], mmap_mode='r')
         lf_dynamic_node_features = dynamic_values['lf_dynamic_node_features'][timestep_in_event]
-        hf_residual_targets = dynamic_values['hf_residual_targets'][timestep_in_event]
-        hf_wet_mask = dynamic_values['hf_wet_masks'][timestep_in_event]
-
-        # torchify
-        lf_static_node_features = torch.from_numpy(lf_static_node_features).float()
         lf_dynamic_node_features = torch.from_numpy(lf_dynamic_node_features).float().unsqueeze(-1)
-        lf_x = torch.cat([lf_static_node_features, lf_dynamic_node_features], dim=-1)
-        lf_coords = torch.from_numpy(lf_coords).float()
-        lf_edge_index = torch.from_numpy(lf_edge_index)
-        lf_edge_attr = torch.from_numpy(lf_static_edge_features).float()
-        hf_x = torch.from_numpy(hf_static_node_features).float()
-        hf_coords = torch.from_numpy(hf_coords).float()
-        hf_edge_index = torch.from_numpy(hf_edge_index)
-        hf_edge_attr = torch.from_numpy(hf_static_edge_features).float()
+        hf_residual_targets = dynamic_values['hf_residual_targets'][timestep_in_event]
         hf_residual_targets = torch.from_numpy(hf_residual_targets).float().unsqueeze(-1)
+        hf_wet_mask = dynamic_values['hf_wet_masks'][timestep_in_event]
         hf_wet_mask = torch.from_numpy(hf_wet_mask).bool().unsqueeze(-1)
+
+        lf_x = torch.cat([self.lf_static_node_features, lf_dynamic_node_features], dim=-1)
+        hf_x = self.hf_static_node_features # no hf dynamic node features are given
 
         data = MultiResolutionData(
             lf_x = lf_x,
-            lf_coords = lf_coords,
-            lf_edge_index = lf_edge_index,
-            lf_edge_attr = lf_edge_attr,
+            lf_coords = self.lf_coords,
+            lf_edge_index = self.lf_edge_index,
+            lf_edge_attr = self.lf_static_edge_features,
             hf_x = hf_x,
-            hf_coords = hf_coords,
-            hf_edge_index = hf_edge_index,
-            hf_edge_attr = hf_edge_attr,
+            hf_coords = self.hf_coords,
+            hf_edge_index = self.hf_edge_index,
+            hf_edge_attr = self.hf_static_edge_features,
             hf_residual_targets = hf_residual_targets, # [N_hf, 1]
             hf_wet_mask = hf_wet_mask,
 
@@ -197,6 +210,11 @@ class FloodEventDataset(Dataset):
 
     def _get_num_timesteps(self, event_idx):
         return self.num_timesteps[event_idx]
+
+    def _get_static_features(self):
+        if self._static_features is None:
+            self._static_features = np.load(self.STATIC_FEATURES_PATH, mmap_mode='r')
+        return self._static_features
 
     def _get_lf_geometry(self):
         return np.load(self.lf_geometry_path, mmap_mode='r')
