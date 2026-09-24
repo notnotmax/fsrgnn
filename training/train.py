@@ -1,3 +1,4 @@
+import json
 import numpy as np
 import os
 import pandas as pd
@@ -10,91 +11,31 @@ from torch.utils.data import Subset
 from torch.optim import AdamW
 from torch.optim.lr_scheduler import ReduceLROnPlateau
 from torch_geometric.loader import DataLoader
+from data.make_dataset import make_carlisle_dataset
 
-def make_carlisle_dataset(validation_group):
-
-    print("Making Carlisle dataset.")
-    DATASET_PATH = '../dataset/Carlisle'
-    EVENT_SUMMARY_PATH = os.path.join(DATASET_PATH, 'Carlisle_event_summary.csv')
-    event_summary = pd.read_csv(EVENT_SUMMARY_PATH)
-
-    num_events = len(event_summary)
-    num_groups = np.max(event_summary['Group'])
-    EVENT_NUM_TIMESTEPS = [266, 242, 198, 253, 318, 199, 266, 312, 316] # static
-    print(f'Total: {num_events} events across {num_groups} groups.')
-
-
-    event_ids = []
-    group_ids = []
-    lf_filepaths = []
-    hf_filepaths = []
-    num_timesteps = []
-
-    for event_idx in range(num_events):
-        event_id = event_summary['No'][event_idx]
-        group_id = event_summary['Group'][event_idx]
-
-        if group_id == validation_group: # leave one out
-            continue
-
-        lf_run_name = event_summary['HEC_RAS_plan'][event_idx]
-        lf_filepath = os.path.join(DATASET_PATH, f'HD_model_data/Low-fidelity/Carlisle_LFmodelA.{lf_run_name}.hdf')
-        hf_run_name = event_summary['Lisflood'][event_idx]
-        hf_filepath = os.path.join(DATASET_PATH, f'HD_model_data/High-fidelity/{hf_run_name}_alltimesteps.npz')
-        # hf_data = np.load(hf_filepath, mmap_mode='r') # slow
-        # event_num_timesteps = hf_data['wse_data'].shape[0]
-        event_num_timesteps = EVENT_NUM_TIMESTEPS[event_idx]
-
-        event_ids.append(event_id)
-        group_ids.append(group_id)
-        lf_filepaths.append(lf_filepath)
-        hf_filepaths.append(hf_filepath)
-        num_timesteps.append(event_num_timesteps)
-
-        print(f'Added event (event id {event_id}, group id {group_id}) to train split. \
-                Event has {event_num_timesteps} timesteps.')
-
-    print(f'Making dataset for train split {validation_group}.')
-
-    # triggers the preprocessing
-    dataset = FloodEventDataset(
-        root_dir = 'data/Carlisle',
-        area_name = 'Carlisle',
-        lf_geometry_path = 'data/Carlisle/LF_geometry_data.npz',
-        hf_geometry_path = 'data/Carlisle/HF_geometry_data.npz',
-        lf_hecras_paths = lf_filepaths,
-        hf_paths = hf_filepaths,
-        hf_filetype = 'npz',
-        event_ids = event_ids,
-        group_ids = group_ids,
-        num_timesteps = num_timesteps,
-        previous_timesteps = 0
-    )
-
-    print(f'Made Carlisle dataset, contains total {len(dataset)} timesteps.')
-
-    return dataset
-
-def train():
+def train(val_group):
     DEVICE = torch.device('cuda')
-    NUM_EPOCHS = 50 # TODO make this bigger
-    LEARNING_RATE = 1e-4
-    VAL_GROUP = 1
+    NUM_EPOCHS = 50 # 100?
+    LEARNING_RATE = 1e-3 # 1e-4
     CHECKPOINT_DIR = 'model/Carlisle'
 
-    print(f"Training on Carlisle, leaving out group {VAL_GROUP}.")
+    print(f"Training on Carlisle with validation group {val_group}.")
 
     os.makedirs(CHECKPOINT_DIR, exist_ok=True)
 
     # ---------- prep datasets/loaders ----------
-    dataset = make_carlisle_dataset(validation_group=VAL_GROUP)
-    ttsplit = np.load(f'../dataset/Carlisle/Train_test_split_data/Train_test_split_ValidateOnGrp_{VAL_GROUP}.npz', mmap_mode='r')
+    dataset = make_carlisle_dataset(validation_group=val_group, mode='train')
+    ttsplit = np.load(f'../dataset/Carlisle/Train_test_split_data/Train_test_split_ValidateOnGrp_{val_group}.npz', mmap_mode='r')
     idx_train = ttsplit['idx_train']
     idx_val = ttsplit['idx_test']
     train_dataset = Subset(dataset, idx_train)
     val_dataset = Subset(dataset, idx_val)
-    train_loader = DataLoader(train_dataset, batch_size=1, shuffle=False) # already shuffled in ttsplit
-    val_loader = DataLoader(val_dataset, batch_size=1, shuffle=False)
+    train_loader = DataLoader(train_dataset, batch_size=8, shuffle=False, num_workers=4) # already shuffled in ttsplit
+    val_loader = DataLoader(val_dataset, batch_size=16, shuffle=False, num_workers=4)
+
+    # constants for this fold/validation group
+    wet_idx = dataset.wet_idx.to(DEVICE)
+    num_hf_nodes = dataset.hf_coords.shape[0]
 
     # ---------- make model ----------
     print('Creating model...')
@@ -134,7 +75,7 @@ def train():
         for batch in train_loader:
             batch = batch.to(DEVICE)
             optimiser.zero_grad()
-            y_pred = model(
+            y_residual_pred = model(
                 lf_x = batch.lf_x,
                 lf_coords = batch.lf_coords,
                 lf_edge_index = batch.lf_edge_index,
@@ -144,10 +85,13 @@ def train():
                 hf_edge_index = batch.hf_edge_index,
                 hf_edge_attr = batch.hf_edge_attr
             )
+            y_pred = torch.clamp(batch.upsampled_water_depth + y_residual_pred, min=0.0)
             loss = masked_loss(
-                y=batch.hf_residual_targets,
-                y_pred=y_pred,
-                wet_mask=batch.hf_wet_mask,
+                y_t = batch.hf_water_depth,
+                y_pred = y_pred,
+                num_graphs = batch.num_graphs,
+                num_hf_nodes = num_hf_nodes,
+                wet_idx = wet_idx,
                 loss_func = loss_func
             )
             loss.backward()
@@ -161,7 +105,7 @@ def train():
         with torch.no_grad():
             for batch in val_loader:
                 batch = batch.to(DEVICE)
-                y_pred = model(
+                y_residual_pred = model(
                     lf_x = batch.lf_x,
                     lf_coords = batch.lf_coords,
                     lf_edge_index = batch.lf_edge_index,
@@ -171,10 +115,13 @@ def train():
                     hf_edge_index = batch.hf_edge_index,
                     hf_edge_attr = batch.hf_edge_attr
                 )
+                y_pred = torch.clamp(batch.upsampled_water_depth + y_residual_pred, min=0.0)
                 val_loss = masked_loss(
-                    y=batch.hf_residual_targets,
-                    y_pred=y_pred,
-                    wet_mask=batch.hf_wet_mask,
+                    y_t = batch.hf_water_depth,
+                    y_pred = y_pred,
+                    num_graphs = batch.num_graphs,
+                    num_hf_nodes = num_hf_nodes,
+                    wet_idx = wet_idx,
                     loss_func = loss_func
                 )
                 total_val_loss += val_loss.item()
@@ -192,16 +139,19 @@ def train():
         # model checkpointing
         if avg_val_loss < best_val_loss:
             best_val_loss = avg_val_loss
-            torch.save(model.state_dict(), os.path.join(CHECKPOINT_DIR, f'Validation_{VAL_GROUP}.pt'))
+            torch.save(model.state_dict(), os.path.join(CHECKPOINT_DIR, f'Validation_{val_group}.pt'))
             print(f'Saved new model checkpoint at epoch {epoch}.')
 
-def masked_loss(y, y_pred, wet_mask, loss_func):
-    loss = loss_func(y, y_pred)
-    wet_loss = loss[wet_mask]
-    # edge case if no wet cells, return 0
-    if wet_loss.numel() == 0:
-        return y_pred.sum() * 0.0
-    return wet_loss.mean()
+def masked_loss(y_t, y_pred, num_graphs, num_hf_nodes, wet_idx, loss_func):
+    # unbatch into 2D shape
+    y_pred_grid = y_pred.view(num_graphs, num_hf_nodes)
+    y_t_grid = y_t.view(num_graphs, num_hf_nodes)
+
+    # filter
+    y_pred_grid = y_pred_grid[:, wet_idx]
+    y_t_grid = y_t_grid[:, wet_idx]
+
+    return loss_func(y_t_grid, y_pred_grid).mean()
 
 def debug():
     DEVICE = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
@@ -241,6 +191,5 @@ def debug():
         break
     print('testing done')
 
-
 if __name__ == '__main__':
-    train()
+    train(val_group=1)
