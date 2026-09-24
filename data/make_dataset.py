@@ -1,45 +1,60 @@
 import numpy as np
-import os.path as osp
+import os
 import pandas as pd
 
 from data.dataset import FloodEventDataset
 from data.hecras_data_retrieval import get_event_timesteps
 
-def make_carlisle_dataset():
+def make_carlisle_dataset(validation_group: int, mode: str):
 
-    print("Making Carlisle dataset.")
+    print(f"Making Carlisle dataset on validation group {validation_group}.")
     DATASET_PATH = '../dataset/Carlisle'
-    EVENT_SUMMARY_PATH = osp.join(DATASET_PATH, 'Carlisle_event_summary.csv')
-    event_df = pd.read_csv(EVENT_SUMMARY_PATH)
+    EVENT_SUMMARY_PATH = os.path.join(DATASET_PATH, 'Carlisle_event_summary.csv')
+    event_summary = pd.read_csv(EVENT_SUMMARY_PATH)
 
-    num_events = 1 # len(event_df)
-    print(f"Number of events: {num_events}")
+    num_events = len(event_summary)
+    num_groups = np.max(event_summary['Group'])
+    EVENT_NUM_TIMESTEPS = [266, 242, 198, 253, 318, 199, 266, 312, 316] # static
+    print(f'Total: {num_events} events across {num_groups} groups.')
+
     event_ids = []
     group_ids = []
     lf_filepaths = []
     hf_filepaths = []
     num_timesteps = []
 
-    for i in range(num_events):
+    for event_idx in range(num_events):
+        event_id = event_summary['No'][event_idx]
+        group_id = event_summary['Group'][event_idx]
 
-        event_ids.append(event_df['No'][i])
-        group_ids.append(event_df['Group'][i])
+        if mode == 'train':
+            if group_id == validation_group: # add everything except val group
+                continue
+        elif mode == 'eval':
+            if group_id != validation_group: # only add val group
+                continue
+        else:
+            assert False, f'Unknown dataset creation mode.'
 
-        lf_run_name = event_df['HEC_RAS_plan'][i]
-        lf_filepath = osp.join(DATASET_PATH, f'HD_model_data/Low-fidelity/Carlisle_LFmodelA.{lf_run_name}.hdf')
+        lf_run_name = event_summary['HEC_RAS_plan'][event_idx]
+        lf_filepath = os.path.join(DATASET_PATH, f'HD_model_data/Low-fidelity/Carlisle_LFmodelA.{lf_run_name}.hdf')
+        hf_run_name = event_summary['Lisflood'][event_idx]
+        hf_filepath = os.path.join(DATASET_PATH, f'HD_model_data/High-fidelity/{hf_run_name}_alltimesteps.npz')
+        # hf_data = np.load(hf_filepath, mmap_mode='r') # slow
+        # event_num_timesteps = hf_data['wse_data'].shape[0]
+        event_num_timesteps = EVENT_NUM_TIMESTEPS[event_idx]
+
+        event_ids.append(event_id)
+        group_ids.append(group_id)
         lf_filepaths.append(lf_filepath)
-
-        hf_run_name = event_df['Lisflood'][i]
-        hf_filepath = osp.join(DATASET_PATH, f'HD_model_data/High-fidelity/{hf_run_name}_alltimesteps.npz')
         hf_filepaths.append(hf_filepath)
+        num_timesteps.append(event_num_timesteps)
 
-        hf_data = np.load(hf_filepath)
-        hf_wse = hf_data['wse_data']
-        num_timesteps.append(hf_wse.shape[0])
-        del hf_wse
+        print(f'Added event (event id {event_id}, group id {group_id}) to train split. \
+                Event has {event_num_timesteps} timesteps.')
 
-        print(f'Added details for event {i+1}.')
-    
+    cat_data_path = os.path.join(DATASET_PATH, f'HF_EOF_analysis/Categories_HFdata_ValidateOnGrp_{validation_group}.npz')
+
     # triggers the preprocessing
     dataset = FloodEventDataset(
         root_dir = 'data/Carlisle',
@@ -49,11 +64,16 @@ def make_carlisle_dataset():
         lf_hecras_paths = lf_filepaths,
         hf_paths = hf_filepaths,
         hf_filetype = 'npz',
+        cat_data_path = cat_data_path,
         event_ids = event_ids,
         group_ids = group_ids,
         num_timesteps = num_timesteps,
         previous_timesteps = 0
     )
+
+    print(f'Made Carlisle dataset, contains total {len(dataset)} timesteps.')
+
+    return dataset
 
 def make_chowilla_dataset(): # TODO refactor
 
@@ -140,4 +160,4 @@ def get_all_event_timesteps_burnett():
         print('HF timesteps', hf_wse.shape)
 
 if __name__ == '__main__':
-    make_carlisle_dataset()
+    make_carlisle_dataset(-1, 'train')

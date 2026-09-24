@@ -3,6 +3,7 @@
 import numpy as np
 import os
 import torch
+import torch.nn.functional as F
 
 from data.hecras_data_retrieval import get_event_timesteps, get_min_cell_elevation, get_water_level
 from scipy.spatial import KDTree
@@ -36,11 +37,12 @@ class FloodEventDataset(Dataset):
         lf_hecras_paths: list[str],
         hf_paths: list[str],
         hf_filetype: str, # file extension, either npz or hdf
+        cat_data_path: str, # TODO
         event_ids: list,
         group_ids: list,
         num_timesteps: list, # number of timesteps per HF run
-        previous_timesteps: int = 0, # number of timesteps to look back
-        normalize: bool = True):
+        previous_timesteps: int = 0 # number of timesteps to look back
+        ):
 
         # filepaths
         self.root = root_dir
@@ -62,10 +64,10 @@ class FloodEventDataset(Dataset):
         self.STATIC_FEATURES_PATH = os.path.join(self.processed_dir, self.STATIC_FEATURES_FILE)
         self.DYNAMIC_FEATURES_PATHS = [os.path.join(self.processed_dir, self.DYNAMIC_FEATURES_FILES[i]) \
                                        for i in range(len(self.DYNAMIC_FEATURES_FILES))]
+        self.CAT_DATA_FILE = cat_data_path
 
         # other settings, unused for now
         self.previous_timesteps = previous_timesteps # TODO timesteps to look back
-        self.normalize = normalize # TODO normalise features
 
         super().__init__(self.root, transform = None, pre_transform = None, pre_filter = None)
 
@@ -81,6 +83,10 @@ class FloodEventDataset(Dataset):
         self.hf_edge_index = torch.from_numpy(static_features['hf_edge_index']).long()
         self.hf_static_node_features = torch.from_numpy(static_features['hf_static_node_features']).float()
         self.hf_static_edge_features = torch.from_numpy(static_features['hf_static_edge_features']).float()
+
+        # get wet cells
+        cat_data = np.load(self.CAT_DATA_FILE, allow_pickle=True)
+        self.wet_idx = torch.from_numpy(cat_data['wet_idx']).long()
 
         # normalise static features, assuming they never change across timesteps and between train/test splits
         EPS = 1e-8
@@ -143,17 +149,16 @@ class FloodEventDataset(Dataset):
         # ----- create dynamic files -----
         for i, event_id in enumerate(self.event_ids):
             lf_dynamic_node_features = self._get_lf_dynamic_node_features(i)
-            hf_residual_targets = self._get_hf_residual_targets(i)
-            hf_wet_masks = self._get_hf_wet_masks(i)
+            hf_water_depth, upsampled_water_depth = self._get_hf_dynamic_data(i)
 
             save_path = os.path.join(self.processed_dir, self.DYNAMIC_FEATURES_FILES[i])
 
             np.savez(save_path,
                      lf_dynamic_node_features = lf_dynamic_node_features,
-                     hf_residual_targets = hf_residual_targets,
-                     hf_wet_masks = hf_wet_masks)
+                     hf_water_depth = hf_water_depth,
+                     upsampled_water_depth = upsampled_water_depth)
             print(f'Saved dynamic values for event {event_id} to {save_path}')
-            del lf_dynamic_node_features, hf_residual_targets
+            del lf_dynamic_node_features, hf_water_depth, upsampled_water_depth
 
     def len(self):
         return sum(self.num_timesteps)
@@ -178,10 +183,10 @@ class FloodEventDataset(Dataset):
         dynamic_values = np.load(self.DYNAMIC_FEATURES_PATHS[event_idx], mmap_mode='r')
         lf_dynamic_node_features = dynamic_values['lf_dynamic_node_features'][timestep_in_event]
         lf_dynamic_node_features = torch.from_numpy(lf_dynamic_node_features).float().unsqueeze(-1)
-        hf_residual_targets = dynamic_values['hf_residual_targets'][timestep_in_event]
-        hf_residual_targets = torch.from_numpy(hf_residual_targets).float().unsqueeze(-1)
-        hf_wet_mask = dynamic_values['hf_wet_masks'][timestep_in_event]
-        hf_wet_mask = torch.from_numpy(hf_wet_mask).bool().unsqueeze(-1)
+        hf_water_depth = dynamic_values['hf_water_depth'][timestep_in_event]
+        hf_water_depth = torch.from_numpy(hf_water_depth).float().unsqueeze(-1)
+        upsampled_water_depth = dynamic_values['upsampled_water_depth'][timestep_in_event]
+        upsampled_water_depth = torch.from_numpy(upsampled_water_depth).float().unsqueeze(-1)
 
         lf_x = torch.cat([self.lf_static_node_features, lf_dynamic_node_features], dim=-1)
         hf_x = self.hf_static_node_features # no hf dynamic node features are given
@@ -195,8 +200,8 @@ class FloodEventDataset(Dataset):
             hf_coords = self.hf_coords,
             hf_edge_index = self.hf_edge_index,
             hf_edge_attr = self.hf_static_edge_features,
-            hf_residual_targets = hf_residual_targets, # [N_hf, 1]
-            hf_wet_mask = hf_wet_mask,
+            hf_water_depth = hf_water_depth, 
+            upsampled_water_depth = upsampled_water_depth, # to use in reconstruction after predicting the residual
 
             # for PyG
             num_nodes = hf_x.size(0),
@@ -210,11 +215,6 @@ class FloodEventDataset(Dataset):
 
     def _get_num_timesteps(self, event_idx):
         return self.num_timesteps[event_idx]
-
-    def _get_static_features(self):
-        if self._static_features is None:
-            self._static_features = np.load(self.STATIC_FEATURES_PATH, mmap_mode='r')
-        return self._static_features
 
     def _get_lf_geometry(self):
         return np.load(self.lf_geometry_path, mmap_mode='r')
@@ -321,8 +321,8 @@ class FloodEventDataset(Dataset):
         hf_water_depth = np.delete(hf_water_depth, ghost_idx, axis=1)
         return hf_water_depth
 
-    def _get_hf_residual_targets(self, event_idx: int):
-        print(f'Getting HF residual targets for event index {event_idx}.')
+    def _get_hf_dynamic_data(self, event_idx: int):
+        print(f'Getting HF dynamic data for event index {event_idx}.')
         # get lf water surface and upscale
         lf_path = self.lf_hecras_paths[event_idx]
 
@@ -349,26 +349,18 @@ class FloodEventDataset(Dataset):
         # ---------- upscale LF to HF ----------
 
         # load geometries (cell coordinates)
-        # assume that ghost cells have been removed
+        # assume that ghost cells have been removed as part of preprocessing
         lf_geom = self._get_lf_geometry()
         lf_coords = lf_geom['cell_coordinates']
         hf_geom = self._get_hf_geometry()
         hf_coords = hf_geom['cell_coordinates']
         hf_elevation = hf_geom['cell_elevation']
 
-        # overlay hf grid onto the lf grid and compute difference
+        # upsampling
         lf_kdtree = KDTree(lf_coords)
         dists, nearest_lf_indices = lf_kdtree.query(hf_coords)
         lf_water_level_upscaled = lf_water_level[:, nearest_lf_indices]
-        upscaled_water_depth = lf_water_level_upscaled - hf_elevation
-        target_residual = hf_water_depth - upscaled_water_depth
 
-        return target_residual
+        upsampled_water_depth = lf_water_level_upscaled - hf_elevation
 
-    def _get_hf_wet_masks(self, event_idx: int, wet_threshold=0.03):
-        if self.hf_filetype == 'npz':
-            hf_water_depth = self._get_hf_water_depth_npz(event_idx)
-        elif self.hf_filetype == 'hdf':
-            hf_water_depth = self._get_hf_water_depth_hecras(event_idx)
-        return hf_water_depth > wet_threshold
-    
+        return hf_water_depth, upsampled_water_depth
