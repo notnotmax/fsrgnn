@@ -30,12 +30,12 @@ def make_mlp(
         # hidden layers
         for _ in range(num_layers-2):
             if norm is not None:
-                layers.append(get_norm_layer(norm, input_size, device))
+                layers.append(get_norm_layer(norm, hidden_size, device))
             layers.append(LinearLayer(hidden_size, hidden_size, activation, bias, device))
         
         # output layer
         if norm is not None:
-            layers.append(get_norm_layer(norm, input_size, device))
+            layers.append(get_norm_layer(norm, hidden_size, device))
         layers.append(LinearLayer(hidden_size, output_size, None, bias, device))
 
     return Sequential(*layers) if len(layers) > 1 else layers[0]
