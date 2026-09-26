@@ -1,3 +1,8 @@
+"""
+Used to create Dataset objects.
+Mainly handles the differing filepath names.
+"""
+
 import numpy as np
 import os
 import pandas as pd
@@ -54,6 +59,7 @@ def make_carlisle_dataset(validation_group: int, mode: str):
                 Event has {event_num_timesteps} timesteps.')
 
     cat_data_path = os.path.join(DATASET_PATH, f'HF_EOF_analysis/Categories_HFdata_ValidateOnGrp_{validation_group}.npz')
+    feature_stats_path = f'data/Carlisle/feature_stats_fold_{validation_group}.npz'
 
     # triggers the preprocessing
     dataset = FloodEventDataset(
@@ -65,6 +71,7 @@ def make_carlisle_dataset(validation_group: int, mode: str):
         hf_paths = hf_filepaths,
         hf_filetype = 'npz',
         cat_data_path = cat_data_path,
+        feature_stats_path = feature_stats_path,
         event_ids = event_ids,
         group_ids = group_ids,
         num_timesteps = num_timesteps,

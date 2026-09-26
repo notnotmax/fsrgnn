@@ -1,3 +1,8 @@
+"""
+Used to extract geometry data and save it in a consistent format.
+Done as part of preprocessing.
+"""
+
 import numpy as np
 
 from data.hecras_data_retrieval import get_cell_coordinates, get_min_cell_elevation,\

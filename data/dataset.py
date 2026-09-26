@@ -37,7 +37,8 @@ class FloodEventDataset(Dataset):
         lf_hecras_paths: list[str],
         hf_paths: list[str],
         hf_filetype: str, # file extension, either npz or hdf
-        cat_data_path: str, # TODO
+        cat_data_path: str,
+        feature_stats_path: str,
         event_ids: list,
         group_ids: list,
         num_timesteps: list, # number of timesteps per HF run
@@ -65,6 +66,7 @@ class FloodEventDataset(Dataset):
         self.DYNAMIC_FEATURES_PATHS = [os.path.join(self.processed_dir, self.DYNAMIC_FEATURES_FILES[i]) \
                                        for i in range(len(self.DYNAMIC_FEATURES_FILES))]
         self.CAT_DATA_FILE = cat_data_path
+        self.FEATURE_STATS_FILE = feature_stats_path
 
         # other settings, unused for now
         self.previous_timesteps = previous_timesteps # TODO timesteps to look back
@@ -88,7 +90,7 @@ class FloodEventDataset(Dataset):
         cat_data = np.load(self.CAT_DATA_FILE, allow_pickle=True)
         self.wet_idx = torch.from_numpy(cat_data['wet_idx']).long()
 
-        # normalise static features, assuming they never change across timesteps and between train/test splits
+        # normalise static features (geometry), assuming they never change across timesteps and between train/test splits
         EPS = 1e-8
 
         lf_node_mean = self.lf_static_node_features.mean(dim=0, keepdim=True)
@@ -187,6 +189,11 @@ class FloodEventDataset(Dataset):
         hf_water_depth = torch.from_numpy(hf_water_depth).float().unsqueeze(-1)
         upsampled_water_depth = dynamic_values['upsampled_water_depth'][timestep_in_event]
         upsampled_water_depth = torch.from_numpy(upsampled_water_depth).float().unsqueeze(-1)
+
+        feature_stats = np.load(self.FEATURE_STATS_PATH)
+        lf_dyn_mean = feature_stats['lf_water_depth_mean']
+        lf_dyn_std = feature_stats['lf_water_depth_std']
+        lf_dynamic_node_features = (lf_dynamic_node_features - lf_dyn_mean) / lf_dyn_std
 
         lf_x = torch.cat([self.lf_static_node_features, lf_dynamic_node_features], dim=-1)
         hf_x = self.hf_static_node_features # no hf dynamic node features are given
