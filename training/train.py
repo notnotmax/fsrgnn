@@ -1,11 +1,9 @@
 import json
 import numpy as np
 import os
-import pandas as pd
 import torch
 import torch.nn as nn
 
-from data.dataset import FloodEventDataset
 from model.fsrgnn import FSRGNN
 from torch.utils.data import Subset
 from torch.optim import AdamW
@@ -13,11 +11,43 @@ from torch.optim.lr_scheduler import ReduceLROnPlateau
 from torch_geometric.loader import DataLoader
 from data.make_dataset import make_carlisle_dataset
 
-def train(val_group):
+def train(val_group: int, identifier: str):
     DEVICE = torch.device('cuda')
     NUM_EPOCHS = 50 # 100?
-    LEARNING_RATE = 1e-3 # 1e-4
     CHECKPOINT_DIR = 'model/Carlisle'
+
+    model_config = {
+        'lf_static_node_features': 3,
+        'lf_dynamic_node_features': 1,
+        'lf_static_edge_features': 1,
+        'hf_static_node_features': 2, # no mannings
+        'hf_static_edge_features': 1,
+        'hidden_features': 32,
+        'output_features': 1,
+        'encoder_layers': 2,
+        'lfgnn_layers': 1,
+        'lfgnn_mlp_layers': 2,
+        'hfgnn_layers': 1,
+        'hfgnn_mlp_layers': 2,
+        'decoder_layers': 2
+    }
+
+    config = {
+        'model_config': model_config,
+        'batch_size': 16,
+        'learning_rate': 1e-3,
+        'weight_decay': 1e-4,
+        'sch_factor': 0.5,
+        'sch_patience': 5
+    }
+
+    # save json for quick reading, not for setting configs
+    with open(os.path.join(CHECKPOINT_DIR, f'{identifier}_config.json')):
+        json.dump(config, f, indent=4)
+
+    optimiser = AdamW(model.parameters(), lr=config['learning_rate'], weight_decay=config['weight_decay'])
+    scheduler = ReduceLROnPlateau(optimiser, mode='min', factor=config['sch_factor'], patience=config['sch_patience'])
+    loss_func = nn.MSELoss()
 
     print(f"Training on Carlisle with validation group {val_group}.")
 
@@ -39,25 +69,7 @@ def train(val_group):
 
     # ---------- make model ----------
     print('Creating model...')
-    model = FSRGNN(
-            lf_static_node_features = 3,
-            lf_dynamic_node_features = 1,
-            lf_static_edge_features = 1,
-            hf_static_node_features = 2, # no mannings
-            hf_static_edge_features = 1,
-            hidden_features = 32, # 64
-            output_features = 1,
-            encoder_layers = 2,
-            lfgnn_layers = 1,
-            lfgnn_mlp_layers = 2,
-            hfgnn_layers = 1,
-            hfgnn_mlp_layers = 2,
-            decoder_layers = 2
-        ).to(DEVICE)
-
-    optimiser = AdamW(model.parameters(), lr=LEARNING_RATE, weight_decay=1e-4)
-    scheduler = ReduceLROnPlateau(optimiser, mode='min', factor=0.5, patience=5)
-    loss_func = nn.MSELoss(reduction='none') # no reduction to allow for wet masking
+    model = FSRGNN(**model_config).to(DEVICE)
 
     # ---------- training/validation loops ----------
     print('Starting training...')
@@ -133,14 +145,23 @@ def train(val_group):
         loss_stats['epoch'].append(epoch)
         loss_stats['train_loss'].append(avg_train_loss)
         loss_stats['val_loss'].append(avg_val_loss)
-        with open('loss_stats.json', 'w') as f:
+        
+        with open(os.path.join(CHECKPOINT_DIR, f'{identifier}_Validation_{val_group}_loss_stats.json'), 'w') as f:
             json.dump(loss_stats, f, indent=4)
 
         # model checkpointing
         if avg_val_loss < best_val_loss:
             best_val_loss = avg_val_loss
-            torch.save(model.state_dict(), os.path.join(CHECKPOINT_DIR, f'Validation_{val_group}.pt'))
+            checkpoint = {
+                'epoch': epoch,
+                'best_val_loss': best_val_loss,
+                'model_config': model_config,
+                'model_state_dict': model.state_dict(),
+                'optimiser_state_dict': optimiser.state_dict(),
+            }
+            torch.save(checkpoint, os.path.join(CHECKPOINT_DIR, f'{identifier}_Validation_{val_group}.pt'))
             print(f'Saved new model checkpoint at epoch {epoch}.')
+
 
 def masked_loss(y_t, y_pred, num_graphs, num_hf_nodes, wet_idx, loss_func):
     # unbatch into 2D shape
@@ -151,45 +172,8 @@ def masked_loss(y_t, y_pred, num_graphs, num_hf_nodes, wet_idx, loss_func):
     y_pred_grid = y_pred_grid[:, wet_idx]
     y_t_grid = y_t_grid[:, wet_idx]
 
-    return loss_func(y_t_grid, y_pred_grid).mean()
+    return loss_func(y_t_grid, y_pred_grid)
 
-def debug():
-    DEVICE = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
-    print('making dataset')
-    dataset = make_carlisle_dataset(1)
-    print('making dataloader')
-    loader = DataLoader(dataset, batch_size=1, shuffle=False)
-    print('making model')
-    model = FSRGNN(
-            lf_static_node_features = 3,
-            lf_dynamic_node_features = 1,
-            lf_static_edge_features = 1,
-            hf_static_node_features = 2, # no mannings
-            hf_static_edge_features = 1,
-            hidden_features = 32, # 64
-            output_features = 1,
-            encoder_layers = 2,
-            lfgnn_layers = 1,
-            lfgnn_mlp_layers = 2,
-            hfgnn_layers = 1,
-            hfgnn_mlp_layers = 2,
-            decoder_layers = 2
-        ).to(DEVICE)
-    print('performing inference')
-    for batch in loader:
-        batch = batch.to(DEVICE)
-        y_pred = model(
-            lf_x = batch.lf_x,
-            lf_coords = batch.lf_coords,
-            lf_edge_index = batch.lf_edge_index,
-            lf_edge_attr = batch.lf_edge_attr,
-            hf_x = batch.hf_x,
-            hf_coords = batch.hf_coords,
-            hf_edge_index = batch.hf_edge_index,
-            hf_edge_attr = batch.hf_edge_attr
-        )
-        break
-    print('testing done')
 
 if __name__ == '__main__':
-    train(val_group=1)
+    train(val_group=1, identifier='featnorm')
