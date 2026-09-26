@@ -65,8 +65,8 @@ class FloodEventDataset(Dataset):
         self.STATIC_FEATURES_PATH = os.path.join(self.processed_dir, self.STATIC_FEATURES_FILE)
         self.DYNAMIC_FEATURES_PATHS = [os.path.join(self.processed_dir, self.DYNAMIC_FEATURES_FILES[i]) \
                                        for i in range(len(self.DYNAMIC_FEATURES_FILES))]
-        self.CAT_DATA_FILE = cat_data_path
-        self.FEATURE_STATS_FILE = feature_stats_path
+        self.CAT_DATA_PATH = cat_data_path
+        self.FEATURE_STATS_PATH = feature_stats_path
 
         # other settings, unused for now
         self.previous_timesteps = previous_timesteps # TODO timesteps to look back
@@ -87,7 +87,7 @@ class FloodEventDataset(Dataset):
         self.hf_static_edge_features = torch.from_numpy(static_features['hf_static_edge_features']).float()
 
         # get wet cells
-        cat_data = np.load(self.CAT_DATA_FILE, allow_pickle=True)
+        cat_data = np.load(self.CAT_DATA_PATH, allow_pickle=True)
         self.wet_idx = torch.from_numpy(cat_data['wet_idx']).long()
 
         # normalise static features (geometry), assuming they never change across timesteps and between train/test splits

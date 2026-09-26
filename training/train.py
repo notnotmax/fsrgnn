@@ -61,12 +61,8 @@ def train(val_group: int, identifier: str):
     idx_val = ttsplit['idx_test']
     train_dataset = Subset(dataset, idx_train)
     val_dataset = Subset(dataset, idx_val)
-    train_loader = DataLoader(train_dataset, batch_size=batch_size, shuffle=False, num_workers=4) # already shuffled in ttsplit
-    val_loader = DataLoader(val_dataset, batch_size=batch_size, shuffle=False, num_workers=4)
-
-    optimiser = AdamW(model.parameters(), lr=config['learning_rate'], weight_decay=config['weight_decay'])
-    scheduler = ReduceLROnPlateau(optimiser, mode='min', factor=config['sch_factor'], patience=config['sch_patience'])
-    loss_func = nn.MSELoss()
+    train_loader = DataLoader(train_dataset, batch_size=config['batch_size'], shuffle=False, num_workers=4) # already shuffled in ttsplit
+    val_loader = DataLoader(val_dataset, batch_size=config['batch_size'], shuffle=False, num_workers=4)
 
     # constants for this fold/validation group
     wet_idx = dataset.wet_idx.to(DEVICE)
@@ -75,6 +71,10 @@ def train(val_group: int, identifier: str):
     # ---------- make model ----------
     print('Creating model...')
     model = FSRGNN(**model_config).to(DEVICE)
+
+    optimiser = AdamW(model.parameters(), lr=config['learning_rate'], weight_decay=config['weight_decay'])
+    scheduler = ReduceLROnPlateau(optimiser, mode='min', factor=config['sch_factor'], patience=config['sch_patience'])
+    loss_func = nn.MSELoss()
 
     # ---------- training/validation loops ----------
     print('Starting training...')
