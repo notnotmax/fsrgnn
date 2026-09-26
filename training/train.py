@@ -47,10 +47,8 @@ def train(val_group: int, identifier: str):
     }
 
     # save json for quick reading, not for setting configs
-    with open(os.path.join(CHECKPOINT_DIR, f'{identifier}_config.json')):
+    with open(os.path.join(CHECKPOINT_DIR, f'{identifier}_config.json'), 'w') as f:
         json.dump(config, f, indent=4)
-
-    
 
     print(f"Training on Carlisle with validation group {val_group}.")
 
@@ -183,4 +181,5 @@ def masked_loss(y_t, y_pred, num_graphs, num_hf_nodes, wet_idx, loss_func):
 
 
 if __name__ == '__main__':
+    print('dynamic feature and pre-layer normalisation')
     train(val_group=1, identifier='260926')
