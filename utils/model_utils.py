@@ -12,19 +12,31 @@ def make_mlp(
     norm: str = None,
     bias: bool = True,
     device: str = 'cpu') -> Module:
+
+    layers = []
+
     if num_layers == 1:
-        layers = [LinearLayer(input_size, output_size, activation, bias, device)]
+        if norm is not None:
+            layers.append(get_norm_layer(norm, input_size, device))
+        layers.append(LinearLayer(input_size, output_size, activation, bias, device))
     else:
         hidden_size = hidden_size if hidden_size is not None else (input_size * 2)
-        layers = []
-        layers.append(LinearLayer(input_size, hidden_size, activation, bias, device)) # Input Layer
-        for _ in range(num_layers-2):
-            layers.append(LinearLayer(hidden_size, hidden_size, activation, bias, device)) # Hidden Layers
-        layers.append(LinearLayer(hidden_size, output_size, None, bias, device)) # Output Layer
 
-    if norm is not None:
-        norm_layer = get_norm_layer(norm, output_size, device=device)
-        layers.append(norm_layer)
+        # input layer
+        if norm is not None:
+            layers.append(get_norm_layer(norm, input_size, device))
+        layers.append(LinearLayer(input_size, hidden_size, activation, bias, device))
+
+        # hidden layers
+        for _ in range(num_layers-2):
+            if norm is not None:
+                layers.append(get_norm_layer(norm, input_size, device))
+            layers.append(LinearLayer(hidden_size, hidden_size, activation, bias, device))
+        
+        # output layer
+        if norm is not None:
+            layers.append(get_norm_layer(norm, input_size, device))
+        layers.append(LinearLayer(hidden_size, output_size, None, bias, device))
 
     return Sequential(*layers) if len(layers) > 1 else layers[0]
 

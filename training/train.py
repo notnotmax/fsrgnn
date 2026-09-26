@@ -29,7 +29,12 @@ def train(val_group: int, identifier: str):
         'lfgnn_mlp_layers': 2,
         'hfgnn_layers': 1,
         'hfgnn_mlp_layers': 2,
-        'decoder_layers': 2
+        'decoder_layers': 2,
+        'encoder_activation': 'relu',
+        'lfgnn_activation': 'relu',
+        'hfgnn_activation': 'relu',
+        'decoder_activation': 'relu',
+        'mlp_norm': 'layernorm'
     }
 
     config = {
@@ -45,9 +50,7 @@ def train(val_group: int, identifier: str):
     with open(os.path.join(CHECKPOINT_DIR, f'{identifier}_config.json')):
         json.dump(config, f, indent=4)
 
-    optimiser = AdamW(model.parameters(), lr=config['learning_rate'], weight_decay=config['weight_decay'])
-    scheduler = ReduceLROnPlateau(optimiser, mode='min', factor=config['sch_factor'], patience=config['sch_patience'])
-    loss_func = nn.MSELoss()
+    
 
     print(f"Training on Carlisle with validation group {val_group}.")
 
@@ -60,8 +63,12 @@ def train(val_group: int, identifier: str):
     idx_val = ttsplit['idx_test']
     train_dataset = Subset(dataset, idx_train)
     val_dataset = Subset(dataset, idx_val)
-    train_loader = DataLoader(train_dataset, batch_size=8, shuffle=False, num_workers=4) # already shuffled in ttsplit
-    val_loader = DataLoader(val_dataset, batch_size=16, shuffle=False, num_workers=4)
+    train_loader = DataLoader(train_dataset, batch_size=batch_size, shuffle=False, num_workers=4) # already shuffled in ttsplit
+    val_loader = DataLoader(val_dataset, batch_size=batch_size, shuffle=False, num_workers=4)
+
+    optimiser = AdamW(model.parameters(), lr=config['learning_rate'], weight_decay=config['weight_decay'])
+    scheduler = ReduceLROnPlateau(optimiser, mode='min', factor=config['sch_factor'], patience=config['sch_patience'])
+    loss_func = nn.MSELoss()
 
     # constants for this fold/validation group
     wet_idx = dataset.wet_idx.to(DEVICE)
@@ -176,4 +183,4 @@ def masked_loss(y_t, y_pred, num_graphs, num_hf_nodes, wet_idx, loss_func):
 
 
 if __name__ == '__main__':
-    train(val_group=1, identifier='featnorm')
+    train(val_group=1, identifier='260926')

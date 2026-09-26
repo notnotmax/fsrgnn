@@ -31,7 +31,9 @@ class FSRGNN(Module):
         encoder_activation: str = 'relu',
         lfgnn_activation: str = 'relu',
         hfgnn_activation: str = 'relu',
-        decoder_activation: str = 'relu'):
+        decoder_activation: str = 'relu',
+        
+        mlp_norm: str = None):
 
         super().__init__()
 
@@ -44,6 +46,7 @@ class FSRGNN(Module):
             hidden_size=encoder_decoder_hidden,
             num_layers=encoder_layers,
             activation=encoder_activation,
+            norm=mlp_norm,
             bias=False)
 
         self.edge_encoder = make_mlp(
@@ -52,6 +55,7 @@ class FSRGNN(Module):
             hidden_size=encoder_decoder_hidden,
             num_layers=encoder_layers,
             activation=encoder_activation,
+            norm=mlp_norm,
             bias=False)
 
         self.hf_edge_encoder = make_mlp(
@@ -60,6 +64,7 @@ class FSRGNN(Module):
             hidden_size=encoder_decoder_hidden,
             num_layers=encoder_layers,
             activation=encoder_activation,
+            norm=mlp_norm,
             bias=False)
 
         self.lfgnn = self._make_gnn(
@@ -70,6 +75,7 @@ class FSRGNN(Module):
             hidden_features=hidden_features,
             num_gnn_layers=lfgnn_layers,
             mlp_layers=lfgnn_mlp_layers,
+            mlp_norm=mlp_norm,
             activation=lfgnn_activation)
 
         self.hfgnn = self._make_gnn(
@@ -80,6 +86,7 @@ class FSRGNN(Module):
             hidden_features=hidden_features,
             num_gnn_layers=hfgnn_layers,
             mlp_layers=hfgnn_mlp_layers,
+            mlp_norm=mlp_norm,
             activation=hfgnn_activation)
         
         self.node_decoder = make_mlp(
@@ -88,6 +95,7 @@ class FSRGNN(Module):
             hidden_size=encoder_decoder_hidden,
             num_layers=decoder_layers,
             activation=decoder_activation,
+            norm=mlp_norm,
             bias=False)
 
         # no edge decoder because we are only interested in node-level regression
@@ -141,7 +149,8 @@ class FSRGNN(Module):
         hidden_features: int,
         num_gnn_layers: int,
         mlp_layers: int,
-        activation: str):
+        activation: str,
+        mlp_norm: str):
 
         layers = []
 
@@ -155,6 +164,7 @@ class FSRGNN(Module):
                     hidden_size=hidden_features,
                     num_layers=mlp_layers,
                     activation=activation,
+                    mlp_norm=mlp_norm,
                     bias=False),
                     'x, edge_index, edge_attr -> x, edge_attr'
             ))
@@ -170,6 +180,7 @@ class FSRGNN(Module):
                     hidden_size=hidden_features,
                     num_layers=mlp_layers,
                     activation=activation,
+                    mlp_norm=mlp_norm,
                     bias=False),
                     'x, edge_index, edge_attr -> x, edge_attr'
             ))
@@ -183,6 +194,7 @@ class FSRGNN(Module):
                         hidden_size=hidden_features,
                         num_layers=mlp_layers,
                         activation=activation,
+                        mlp_norm=mlp_norm,
                         bias=False),
                     'x, edge_index, edge_attr -> x, edge_attr'
                 ))
@@ -195,6 +207,7 @@ class FSRGNN(Module):
                     hidden_size=hidden_features,
                     num_layers=mlp_layers,
                     activation=activation,
+                    mlp_norm=mlp_norm,
                     bias=False),
                 'x, edge_index, edge_attr -> x, edge_attr'
             ))
@@ -216,6 +229,7 @@ class NodeEdgeConv(MessagePassing):
         hidden_size: int,
         num_layers: int = 2,
         activation: str = 'relu',
+        mlp_norm: str = None,
         bias: bool = False):
 
         super().__init__(aggr='sum')
@@ -226,6 +240,7 @@ class NodeEdgeConv(MessagePassing):
             hidden_size=hidden_size,
             num_layers=num_layers,
             activation=activation,
+            norm=mlp_norm,
             bias=bias)
         
         self.node_mlp = make_mlp(
@@ -234,6 +249,7 @@ class NodeEdgeConv(MessagePassing):
             hidden_size=hidden_size,
             num_layers=num_layers,
             activation=activation,
+            norm=mlp_norm,
             bias=bias)
 
     def forward(self, x: Tensor, edge_index: Tensor, edge_attr: Tensor) -> Tensor:
