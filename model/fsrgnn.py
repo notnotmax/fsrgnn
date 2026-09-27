@@ -58,6 +58,15 @@ class FSRGNN(Module):
             norm=mlp_norm,
             bias=False)
 
+        self.hf_node_encoder = make_mlp(
+            input_size=hf_static_node_features,
+            output_size=hidden_features,
+            hidden_size=encoder_decoder_hidden,
+            num_layers=encoder_layers,
+            activation=encoder_activation,
+            norm=mlp_norm,
+            bias=False)
+
         self.hf_edge_encoder = make_mlp(
             input_size=hf_static_edge_features,
             output_size=hidden_features,
@@ -79,7 +88,7 @@ class FSRGNN(Module):
             activation=lfgnn_activation)
 
         self.hfgnn = self._make_gnn(
-            input_node_size=hidden_features,
+            input_node_size=hidden_features * 2, # using concatenated lf and hf
             input_edge_size=hidden_features,
             output_node_size=hidden_features,
             output_edge_size=hidden_features,
@@ -107,12 +116,14 @@ class FSRGNN(Module):
 
         x_lf, _ = self.lfgnn(x_lf, lf_edge_index, e_lf) # ignore edge features because they are not used in upscaling
 
-        x_hf = self.upsample(x_lf, lf_coords, hf_coords, k = 4)
+        x_lf_upsampled = self.upsample(x_lf, lf_coords, hf_coords, k = 4)
 
-        # TODO use HF static node features, either concatenate before hfgnn or put into MLP for attention style weights
+        x_hf = self.hf_node_encoder(hf_x)
+
+        x_hf_combined = torch.cat([x_lf_upsampled, x_hf], dim=-1)
 
         e_hf = self.hf_edge_encoder(hf_edge_attr)
-        x_hf, _ = self.hfgnn(x_hf, hf_edge_index, e_hf)
+        x_hf, _ = self.hfgnn(x_hf_combined, hf_edge_index, e_hf)
 
         y_pred = self.node_decoder(x_hf)
         return y_pred
