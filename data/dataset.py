@@ -109,6 +109,11 @@ class FloodEventDataset(Dataset):
         hf_edge_std = self.hf_static_edge_features.std(dim=0, keepdim=True)
         self.hf_static_edge_features = (self.hf_static_edge_features - hf_edge_mean) / (hf_edge_std + EPS)
 
+        # save dynamic feature stats for normalisation in get()
+        feature_stats = np.load(self.FEATURE_STATS_PATH)
+        self.lf_dyn_mean = feature_stats['lf_water_depth_mean']
+        self.lf_dyn_std = feature_stats['lf_water_depth_std']
+
     @property
     def raw_file_names(self):
         # pass filepaths into the constructor
@@ -189,11 +194,8 @@ class FloodEventDataset(Dataset):
         hf_water_depth = torch.from_numpy(hf_water_depth).float().unsqueeze(-1)
         upsampled_water_depth = dynamic_values['upsampled_water_depth'][timestep_in_event]
         upsampled_water_depth = torch.from_numpy(upsampled_water_depth).float().unsqueeze(-1)
-
-        feature_stats = np.load(self.FEATURE_STATS_PATH)
-        lf_dyn_mean = feature_stats['lf_water_depth_mean']
-        lf_dyn_std = feature_stats['lf_water_depth_std']
-        lf_dynamic_node_features = (lf_dynamic_node_features - lf_dyn_mean) / lf_dyn_std
+        
+        lf_dynamic_node_features = (lf_dynamic_node_features - self.lf_dyn_mean) / self.lf_dyn_std
 
         lf_x = torch.cat([self.lf_static_node_features, lf_dynamic_node_features], dim=-1)
         hf_x = self.hf_static_node_features # no hf dynamic node features are given
