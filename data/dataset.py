@@ -61,12 +61,20 @@ class FloodEventDataset(Dataset):
 
         # preset filenames to save into in processed dir
         self.STATIC_FEATURES_FILE = 'static_features.npz'
-        self.DYNAMIC_FEATURES_FILES = [f'dynamic_values_event_{event_id}.npz' for event_id in self.event_ids]
         self.STATIC_FEATURES_PATH = os.path.join(self.processed_dir, self.STATIC_FEATURES_FILE)
-        self.DYNAMIC_FEATURES_PATHS = [os.path.join(self.processed_dir, self.DYNAMIC_FEATURES_FILES[i]) \
-                                       for i in range(len(self.DYNAMIC_FEATURES_FILES))]
+
+        self.LF_DYNAMIC_FEATURES_PATHS = [os.path.join(self.processed_dir, f'lf_dynamic_node_features_event_{event_id}.npy') \
+                                        for event_id in self.event_ids]
+        self.UPSAMPLED_WATER_DEPTH_PATHS = [os.path.join(self.processed_dir, f'upsampled_water_depth_event_{event_id}.npy') \
+                                        for event_id in self.event_ids]
+        self.HF_WATER_DEPTH_PATHS = [os.path.join(self.processed_dir, f'hf_water_depth_event_{event_id}.npy') \
+                                        for event_id in self.event_ids]
+
+
         self.CAT_DATA_PATH = cat_data_path
         self.FEATURE_STATS_PATH = feature_stats_path
+
+        self.dynamic_data_per_event = {} # caching
 
         # other settings, unused for now
         self.previous_timesteps = previous_timesteps # TODO timesteps to look back
@@ -74,7 +82,7 @@ class FloodEventDataset(Dataset):
         super().__init__(self.root, transform = None, pre_transform = None, pre_filter = None)
 
         # post-process call one-time loading of static features to reduce loading from disk
-        static_features = np.load(self.STATIC_FEATURES_PATH, mmap_mode='r')
+        static_features = np.load(self.STATIC_FEATURES_PATH)
 
         self.lf_coords = torch.from_numpy(static_features['lf_coords']).float()
         self.lf_edge_index = torch.from_numpy(static_features['lf_edge_index']).long()
@@ -89,6 +97,8 @@ class FloodEventDataset(Dataset):
         # get wet cells
         cat_data = np.load(self.CAT_DATA_PATH, allow_pickle=True)
         self.wet_idx = torch.from_numpy(cat_data['wet_idx']).long()
+
+        # ---------- feature normalisation ----------
 
         # normalise static features (geometry), assuming they never change across timesteps and between train/test splits
         EPS = 1e-8
@@ -109,7 +119,7 @@ class FloodEventDataset(Dataset):
         hf_edge_std = self.hf_static_edge_features.std(dim=0, keepdim=True)
         self.hf_static_edge_features = (self.hf_static_edge_features - hf_edge_mean) / (hf_edge_std + EPS)
 
-        # save dynamic feature stats for normalisation in get()
+        # load dynamic feature statistics for this fold
         feature_stats = np.load(self.FEATURE_STATS_PATH)
         self.lf_dyn_mean = feature_stats['lf_water_depth_mean']
         self.lf_dyn_std = feature_stats['lf_water_depth_std']
@@ -122,8 +132,7 @@ class FloodEventDataset(Dataset):
     @property
     def processed_file_names(self):
         return [
-            self.STATIC_FEATURES_FILE,
-            *self.DYNAMIC_FEATURES_FILES
+            self.STATIC_FEATURES_FILE, # TODO add dynamic paths
         ]
 
     def download(self):
@@ -158,17 +167,30 @@ class FloodEventDataset(Dataset):
             lf_dynamic_node_features = self._get_lf_dynamic_node_features(i)
             hf_water_depth, upsampled_water_depth = self._get_hf_dynamic_data(i)
 
-            save_path = os.path.join(self.processed_dir, self.DYNAMIC_FEATURES_FILES[i])
+            np.save(f'data/Carlisle/processed/lf_dynamic_node_features_event_{i}.npy', lf_dynamic_node_features)
+            np.save(f'data/Carlisle/processed/upsampled_water_depth_event_{i}.npy', upsampled_water_depth)
+            np.save(f'data/Carlisle/processed/hf_water_depth_event_{i}.npy', hf_water_depth)
 
-            np.savez(save_path,
-                     lf_dynamic_node_features = lf_dynamic_node_features,
-                     hf_water_depth = hf_water_depth,
-                     upsampled_water_depth = upsampled_water_depth)
-            print(f'Saved dynamic values for event {event_id} to {save_path}')
+            print(f'Saved dynamic values for event {event_id}.')
             del lf_dynamic_node_features, hf_water_depth, upsampled_water_depth
 
     def len(self):
         return sum(self.num_timesteps)
+
+    def _get_dynamic_data(self, event_idx: int):
+        if event_idx not in self.dynamic_data_per_event:
+            self.dynamic_data_per_event[event_idx] = {
+                "lf_dynamic_node_features": np.load(
+                    self.LF_DYNAMIC_FEATURES_PATHS[event_idx], mmap_mode="r"
+                ),
+                "upsampled_water_depth": np.load(
+                    self.UPSAMPLED_WATER_DEPTH_PATHS[event_idx], mmap_mode="r"
+                ),
+                "hf_water_depth": np.load(
+                    self.HF_WATER_DEPTH_PATHS[event_idx], mmap_mode="r"
+                ),
+            }
+        return self.dynamic_data_per_event[event_idx]
 
     def get(self, idx):
 
@@ -182,18 +204,21 @@ class FloodEventDataset(Dataset):
                 timestep_in_event = idx - timesteps_counter
                 break
             timesteps_counter += event_num_timesteps
-        assert 0 <= event_idx < len(self.DYNAMIC_FEATURES_PATHS), f"Error: event index {event_idx} is out of bounds."
+        assert 0 <= event_idx < len(self.event_ids), f"Error: event index {event_idx} is out of bounds."
         assert 0 <= timestep_in_event < self.num_timesteps[event_idx], \
             f"Error: timestep {timestep_in_event} out of bounds for event with {self.num_timesteps[event_idx]} timesteps."
 
         # load dynamic data
-        dynamic_values = np.load(self.DYNAMIC_FEATURES_PATHS[event_idx], mmap_mode='r')
-        lf_dynamic_node_features = dynamic_values['lf_dynamic_node_features'][timestep_in_event]
+        dynamic_data = self._get_dynamic_data(event_idx)
+
+        lf_dynamic_node_features = dynamic_data['lf_dynamic_node_features'][timestep_in_event]
         lf_dynamic_node_features = torch.from_numpy(lf_dynamic_node_features).float().unsqueeze(-1)
-        hf_water_depth = dynamic_values['hf_water_depth'][timestep_in_event]
-        hf_water_depth = torch.from_numpy(hf_water_depth).float().unsqueeze(-1)
-        upsampled_water_depth = dynamic_values['upsampled_water_depth'][timestep_in_event]
+
+        upsampled_water_depth = dynamic_data['upsampled_water_depth'][timestep_in_event]
         upsampled_water_depth = torch.from_numpy(upsampled_water_depth).float().unsqueeze(-1)
+
+        hf_water_depth = dynamic_data['hf_water_depth'][timestep_in_event]
+        hf_water_depth = torch.from_numpy(hf_water_depth).float().unsqueeze(-1)
         
         lf_dynamic_node_features = (lf_dynamic_node_features - self.lf_dyn_mean) / self.lf_dyn_std
 
@@ -226,7 +251,7 @@ class FloodEventDataset(Dataset):
         return self.num_timesteps[event_idx]
 
     def _get_lf_geometry(self):
-        return np.load(self.lf_geometry_path, mmap_mode='r')
+        return np.load(self.lf_geometry_path)
 
     def _get_lf_coords(self):
         lf_geom = self._get_lf_geometry()
@@ -296,7 +321,7 @@ class FloodEventDataset(Dataset):
         return lf_water_depth
 
     def _get_hf_geometry(self):
-        return np.load(self.hf_geometry_path, mmap_mode='r')
+        return np.load(self.hf_geometry_path)
 
     def _get_hf_coords(self):
         hf_geom = self._get_hf_geometry()

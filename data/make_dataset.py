@@ -166,5 +166,15 @@ def get_all_event_timesteps_burnett():
         hf_wse = hf_data['wl_data']
         print('HF timesteps', hf_wse.shape)
 
+def preprocess_carlisle():
+    for i in range(1, 10):
+        filepath = f'data/Carlisle/processed/dynamic_values_event_{i}.npz'
+        print(f'Processing {filepath}.')
+        with np.load(filepath) as f:
+            np.save(f'data/Carlisle/processed/lf_dynamic_node_features_event_{i}.npy', f['lf_dynamic_node_features'])
+            np.save(f'data/Carlisle/processed/upsampled_water_depth_event_{i}.npy', f['upsampled_water_depth'])
+            np.save(f'data/Carlisle/processed/hf_water_depth_event_{i}.npy', f['hf_water_depth'])
+
 if __name__ == '__main__':
-    make_carlisle_dataset(-1, 'train')
+    # make_carlisle_dataset(-1, 'train')
+    preprocess_carlisle()
