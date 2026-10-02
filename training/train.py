@@ -13,7 +13,7 @@ from data.make_dataset import make_carlisle_dataset
 
 def train(mode: str, identifier: str, val_group: int):
     DEVICE = torch.device('cuda')
-    NUM_EPOCHS = 100 # num epochs to add, not do until this num of epochs
+    NUM_EPOCHS = 10 # num epochs to add, not do until this num of epochs
     CHECKPOINT_DIR = 'model/Carlisle'
     CONFIG_PATH = f'{CHECKPOINT_DIR}/{identifier}_config.json'
     LATEST_CHECKPOINT_PATH = f'{CHECKPOINT_DIR}/{identifier}_Val_{val_group}_latest.pt'
@@ -67,7 +67,7 @@ def train(mode: str, identifier: str, val_group: int):
             loss_stats = json.load(f)
 
     else:
-        assert False, f'Unknown training mode: {mode}'
+        assert False, f'Unknown training mode: {mode}, should be "new" or "continue"'
 
     # ---------- prep datasets/loaders ----------
     dataset = make_carlisle_dataset(validation_group=val_group, mode='train')
@@ -77,7 +77,7 @@ def train(mode: str, identifier: str, val_group: int):
     event_ends = np.cumsum(np.asarray(dataset.num_timesteps, dtype=np.int32))
     idx_train = filter_timesteps(ttsplit['idx_train'], event_ends, t_interval)
     idx_val = filter_timesteps(ttsplit['idx_test'], event_ends, t_interval)
-    print(f'----- DEBUG INFO {np.max(idx_train)} {np.max(idx_val)} -----')
+    print(f'----- DEBUG INFO train samples {idx_train.shape}, validation samples {idx_val.shape} -----')
 
     train_dataset = Subset(dataset, idx_train)
     val_dataset = Subset(dataset, idx_val)
@@ -121,7 +121,8 @@ def train(mode: str, identifier: str, val_group: int):
                 hf_edge_index = batch.hf_edge_index,
                 hf_edge_attr = batch.hf_edge_attr
             )
-            y_pred = torch.clamp(batch.upsampled_water_depth + y_residual_pred, min=0.0)
+            y_pred = batch.upsampled_water_depth + y_residual_pred
+            # y_pred = torch.clamp(batch.upsampled_water_depth + y_residual_pred, min=0.0)
             loss = masked_loss(
                 y_t = batch.hf_water_depth,
                 y_pred = y_pred,
@@ -151,7 +152,8 @@ def train(mode: str, identifier: str, val_group: int):
                     hf_edge_index = batch.hf_edge_index,
                     hf_edge_attr = batch.hf_edge_attr
                 )
-                y_pred = torch.clamp(batch.upsampled_water_depth + y_residual_pred, min=0.0)
+                y_pred = batch.upsampled_water_depth + y_residual_pred
+                # y_pred = torch.clamp(batch.upsampled_water_depth + y_residual_pred, min=0.0)
                 val_loss = masked_loss(
                     y_t = batch.hf_water_depth,
                     y_pred = y_pred,
@@ -222,5 +224,5 @@ def filter_timesteps(indices, event_ends, t_interval):
 
 
 if __name__ == '__main__':
-    print('----- LR = 1e-3, half timesteps, 100 epochs, bias -----')
-    train(mode='new', identifier='2026-10-01b', val_group=1)
+    print('----- Fixed negative upsampled water depth values, removed clamping during training -----')
+    train(mode='new', identifier='2026-10-02', val_group=1)
