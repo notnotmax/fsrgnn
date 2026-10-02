@@ -327,6 +327,10 @@ class FloodEventDataset(Dataset):
         hf_geom = self._get_hf_geometry()
         return hf_geom['cell_coordinates']
 
+    def _get_hf_elevation(self):
+        hf_geom = self._get_hf_geometry()
+        return hf_geom['cell_elevation']
+
     def _get_hf_edge_index(self):
         hf_geom = self._get_hf_geometry()
         return hf_geom['edge_index']

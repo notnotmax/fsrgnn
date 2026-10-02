@@ -11,58 +11,78 @@ from torch.optim.lr_scheduler import ReduceLROnPlateau
 from torch_geometric.loader import DataLoader
 from data.make_dataset import make_carlisle_dataset
 
-def train(val_group: int, identifier: str):
+def train(mode: str, identifier: str, val_group: int):
     DEVICE = torch.device('cuda')
-    NUM_EPOCHS = 50 # 100?
+    NUM_EPOCHS = 100 # num epochs to add, not do until this num of epochs
     CHECKPOINT_DIR = 'model/Carlisle'
-
-    model_config = {
-        'lf_static_node_features': 3,
-        'lf_dynamic_node_features': 1,
-        'lf_static_edge_features': 1,
-        'hf_static_node_features': 2, # no mannings
-        'hf_static_edge_features': 1,
-        'hidden_features': 32,
-        'output_features': 1,
-        'encoder_layers': 2,
-        'lfgnn_layers': 1,
-        'lfgnn_mlp_layers': 2,
-        'hfgnn_layers': 1,
-        'hfgnn_mlp_layers': 2,
-        'decoder_layers': 2,
-        'encoder_activation': 'relu',
-        'lfgnn_activation': 'relu',
-        'hfgnn_activation': 'relu',
-        'decoder_activation': 'relu',
-        'mlp_norm': 'layernorm'
-    }
-
-    config = {
-        'model_config': model_config,
-        'batch_size': 16,
-        'learning_rate': 1e-3,
-        'weight_decay': 1e-4,
-        'sch_factor': 0.5,
-        'sch_patience': 5
-    }
-
-    # save json for quick reading, not for setting configs
-    with open(os.path.join(CHECKPOINT_DIR, f'{identifier}_config.json'), 'w') as f:
-        json.dump(config, f, indent=4)
-
-    print(f"Training on Carlisle with validation group {val_group}.")
+    CONFIG_PATH = f'{CHECKPOINT_DIR}/{identifier}_config.json'
+    LATEST_CHECKPOINT_PATH = f'{CHECKPOINT_DIR}/{identifier}_Val_{val_group}_latest.pt'
+    BEST_CHECKPOINT_PATH = f'{CHECKPOINT_DIR}/{identifier}_Val_{val_group}_best.pt'
+    LOSS_STATS_PATH = f'{CHECKPOINT_DIR}/{identifier}_Val_{val_group}_loss_stats.json'
 
     os.makedirs(CHECKPOINT_DIR, exist_ok=True)
 
+    if mode == 'new':
+
+        with open(CONFIG_PATH, 'r') as f:
+            config = json.load(f)
+            model_config = config['model_config']
+            batch_size = config['batch_size']
+            learning_rate = config['learning_rate']
+            weight_decay = config['weight_decay']
+            sch_factor = config['sch_factor']
+            sch_patience = config['sch_patience']
+            t_interval = config['t_interval']
+
+        start_epoch = 1
+        best_val_loss = float('inf')
+        loss_stats = {
+            'epoch': [],
+            'train_loss': [],
+            'val_loss': []
+        }
+        print(f'Training new model on Carlisle on validation group {val_group} using config {CONFIG_PATH}.')
+
+    elif mode == 'continue':
+
+        with open(CONFIG_PATH, 'r') as f:
+            config = json.load(f)
+            model_config = config['model_config']
+            batch_size = config['batch_size']
+            learning_rate = config['learning_rate']
+            weight_decay = config['weight_decay']
+            sch_factor = config['sch_factor']
+            sch_patience = config['sch_patience']
+            t_interval = config['t_interval']
+
+        checkpoint = torch.load(LATEST_CHECKPOINT_PATH, map_location=DEVICE)
+        start_epoch = checkpoint['epoch'] + 1
+        best_val_loss = checkpoint['best_val_loss']
+        # model_config = checkpoint['model_config']
+        model_state_dict = checkpoint['model_state_dict']
+        optimiser_state_dict = checkpoint['optimiser_state_dict']
+        scheduler_state_dict = checkpoint['scheduler_state_dict']
+
+        with open(LOSS_STATS_PATH, 'r') as f:
+            loss_stats = json.load(f)
+
+    else:
+        assert False, f'Unknown training mode: {mode}'
+
     # ---------- prep datasets/loaders ----------
     dataset = make_carlisle_dataset(validation_group=val_group, mode='train')
-    ttsplit = np.load(f'../dataset/Carlisle/Train_test_split_data/Train_test_split_ValidateOnGrp_{val_group}.npz', mmap_mode='r')
-    idx_train = ttsplit['idx_train']
-    idx_val = ttsplit['idx_test']
+    ttsplit = np.load(f'../dataset/Carlisle/Train_test_split_data/Train_test_split_ValidateOnGrp_{val_group}.npz')
+
+    # optionally filter indices to only use every <t_interval> timesteps from each event
+    event_ends = np.cumsum(np.asarray(dataset.num_timesteps, dtype=np.int32))
+    idx_train = filter_timesteps(ttsplit['idx_train'], event_ends, t_interval)
+    idx_val = filter_timesteps(ttsplit['idx_test'], event_ends, t_interval)
+    print(f'----- DEBUG INFO {np.max(idx_train)} {np.max(idx_val)} -----')
+
     train_dataset = Subset(dataset, idx_train)
     val_dataset = Subset(dataset, idx_val)
-    train_loader = DataLoader(train_dataset, batch_size=config['batch_size'], shuffle=False, num_workers=4) # already shuffled in ttsplit
-    val_loader = DataLoader(val_dataset, batch_size=config['batch_size'], shuffle=False, num_workers=4)
+    train_loader = DataLoader(train_dataset, batch_size=batch_size, shuffle=False, num_workers=4, persistent_workers=True) # already shuffled in ttsplit
+    val_loader = DataLoader(val_dataset, batch_size=batch_size, shuffle=False, num_workers=4, persistent_workers=True)
 
     # constants for this fold/validation group
     wet_idx = dataset.wet_idx.to(DEVICE)
@@ -72,20 +92,19 @@ def train(val_group: int, identifier: str):
     print('Creating model...')
     model = FSRGNN(**model_config).to(DEVICE)
 
-    optimiser = AdamW(model.parameters(), lr=config['learning_rate'], weight_decay=config['weight_decay'])
-    scheduler = ReduceLROnPlateau(optimiser, mode='min', factor=config['sch_factor'], patience=config['sch_patience'])
+    optimiser = AdamW(model.parameters(), lr=learning_rate, weight_decay=weight_decay)
+    scheduler = ReduceLROnPlateau(optimiser, mode='min', factor=sch_factor, patience=sch_patience)
     loss_func = nn.MSELoss()
+
+    if mode == 'continue':
+        model.load_state_dict(model_state_dict)
+        optimiser.load_state_dict(optimiser_state_dict)
+        scheduler.load_state_dict(scheduler_state_dict)
 
     # ---------- training/validation loops ----------
     print('Starting training...')
-    best_val_loss = float('inf')
-    loss_stats = {
-        'epoch': [],
-        'train_loss': [],
-        'val_loss': []
-    }
-
-    for epoch in range(1, NUM_EPOCHS + 1):
+    
+    for epoch in range(start_epoch, start_epoch + NUM_EPOCHS):
         # training loop
         model.train()
         total_train_loss = 0.0
@@ -151,21 +170,32 @@ def train(val_group: int, identifier: str):
         loss_stats['train_loss'].append(avg_train_loss)
         loss_stats['val_loss'].append(avg_val_loss)
         
-        with open(os.path.join(CHECKPOINT_DIR, f'{identifier}_Validation_{val_group}_loss_stats.json'), 'w') as f:
+        with open(LOSS_STATS_PATH, 'w') as f:
             json.dump(loss_stats, f, indent=4)
 
-        # model checkpointing
+        # ---------- checkpointing ----------
+
         if avg_val_loss < best_val_loss:
             best_val_loss = avg_val_loss
-            checkpoint = {
+            best_checkpoint = {
                 'epoch': epoch,
                 'best_val_loss': best_val_loss,
                 'model_config': model_config,
-                'model_state_dict': model.state_dict(),
-                'optimiser_state_dict': optimiser.state_dict(),
+                'model_state_dict': model.state_dict()
             }
-            torch.save(checkpoint, os.path.join(CHECKPOINT_DIR, f'{identifier}_Validation_{val_group}.pt'))
-            print(f'Saved new model checkpoint at epoch {epoch}.')
+            torch.save(best_checkpoint, BEST_CHECKPOINT_PATH)
+            print(f'Saved new best model checkpoint at epoch {epoch}.')
+
+        # always save latest model to use when resuming training
+        latest_checkpoint = {
+            'epoch': epoch,
+            'best_val_loss': best_val_loss,
+            'model_config': model_config,
+            'model_state_dict': model.state_dict(),
+            'optimiser_state_dict': optimiser.state_dict(),
+            'scheduler_state_dict': scheduler.state_dict()
+        }
+        torch.save(latest_checkpoint, LATEST_CHECKPOINT_PATH)
 
 
 def masked_loss(y_t, y_pred, num_graphs, num_hf_nodes, wet_idx, loss_func):
@@ -180,6 +210,17 @@ def masked_loss(y_t, y_pred, num_graphs, num_hf_nodes, wet_idx, loss_func):
     return loss_func(y_t_grid, y_pred_grid)
 
 
+def filter_timesteps(indices, event_ends, t_interval):
+    """
+    Converts global timestep indices to event-local indices and filters by t_interval.
+    e.g. if t_interval=2, take every even indexed timestep per event.
+    """
+    event_ids = np.searchsorted(event_ends, indices, side='right')
+    event_starts = np.concatenate(([0], event_ends[:-1]))
+    local_timesteps = indices - event_starts[event_ids]
+    return indices[(local_timesteps % t_interval) == 0]
+
+
 if __name__ == '__main__':
-    print('dynamic feature and pre-layer normalisation')
-    train(val_group=1, identifier='260926')
+    print('----- LR = 1e-3, half timesteps, 100 epochs, bias -----')
+    train(mode='new', identifier='2026-10-01b', val_group=1)

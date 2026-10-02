@@ -33,7 +33,8 @@ class FSRGNN(Module):
         hfgnn_activation: str = 'relu',
         decoder_activation: str = 'relu',
         
-        mlp_norm: str = None):
+        mlp_norm: str = None,
+        bias: bool = False):
 
         super().__init__()
 
@@ -47,7 +48,7 @@ class FSRGNN(Module):
             num_layers=encoder_layers,
             activation=encoder_activation,
             norm=mlp_norm,
-            bias=False)
+            bias=bias)
 
         self.edge_encoder = make_mlp(
             input_size=lf_static_edge_features,
@@ -56,7 +57,7 @@ class FSRGNN(Module):
             num_layers=encoder_layers,
             activation=encoder_activation,
             norm=mlp_norm,
-            bias=False)
+            bias=bias)
 
         self.hf_node_encoder = make_mlp(
             input_size=hf_static_node_features,
@@ -65,7 +66,7 @@ class FSRGNN(Module):
             num_layers=encoder_layers,
             activation=encoder_activation,
             norm=mlp_norm,
-            bias=False)
+            bias=bias)
 
         self.hf_edge_encoder = make_mlp(
             input_size=hf_static_edge_features,
@@ -74,7 +75,7 @@ class FSRGNN(Module):
             num_layers=encoder_layers,
             activation=encoder_activation,
             norm=mlp_norm,
-            bias=False)
+            bias=bias)
 
         self.lfgnn = self._make_gnn(
             input_node_size=hidden_features,
@@ -85,7 +86,8 @@ class FSRGNN(Module):
             num_gnn_layers=lfgnn_layers,
             mlp_layers=lfgnn_mlp_layers,
             mlp_norm=mlp_norm,
-            activation=lfgnn_activation)
+            activation=lfgnn_activation,
+            bias=bias)
 
         self.hfgnn = self._make_gnn(
             input_node_size=hidden_features * 2, # using concatenated lf and hf
@@ -96,7 +98,8 @@ class FSRGNN(Module):
             num_gnn_layers=hfgnn_layers,
             mlp_layers=hfgnn_mlp_layers,
             mlp_norm=mlp_norm,
-            activation=hfgnn_activation)
+            activation=hfgnn_activation,
+            bias=bias)
         
         self.node_decoder = make_mlp(
             input_size=hidden_features,
@@ -105,7 +108,7 @@ class FSRGNN(Module):
             num_layers=decoder_layers,
             activation=decoder_activation,
             norm=mlp_norm,
-            bias=False)
+            bias=bias)
 
         # no edge decoder because we are only interested in node-level regression
 
@@ -161,7 +164,8 @@ class FSRGNN(Module):
         num_gnn_layers: int,
         mlp_layers: int,
         activation: str,
-        mlp_norm: str):
+        mlp_norm: str,
+        bias: bool):
 
         layers = []
 
@@ -176,7 +180,7 @@ class FSRGNN(Module):
                     num_layers=mlp_layers,
                     activation=activation,
                     mlp_norm=mlp_norm,
-                    bias=False),
+                    bias=bias),
                     'x, edge_index, edge_attr -> x, edge_attr'
             ))
 
@@ -192,7 +196,7 @@ class FSRGNN(Module):
                     num_layers=mlp_layers,
                     activation=activation,
                     mlp_norm=mlp_norm,
-                    bias=False),
+                    bias=bias),
                     'x, edge_index, edge_attr -> x, edge_attr'
             ))
             for _ in range(num_gnn_layers - 2):
@@ -206,7 +210,7 @@ class FSRGNN(Module):
                         num_layers=mlp_layers,
                         activation=activation,
                         mlp_norm=mlp_norm,
-                        bias=False),
+                        bias=bias),
                     'x, edge_index, edge_attr -> x, edge_attr'
                 ))
             layers.append(( # last layer
@@ -219,7 +223,7 @@ class FSRGNN(Module):
                     num_layers=mlp_layers,
                     activation=activation,
                     mlp_norm=mlp_norm,
-                    bias=False),
+                    bias=bias),
                 'x, edge_index, edge_attr -> x, edge_attr'
             ))
 
