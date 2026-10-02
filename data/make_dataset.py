@@ -38,8 +38,10 @@ def make_carlisle_dataset(validation_group: int, mode: str):
         elif mode == 'eval':
             if group_id != validation_group: # only add val group
                 continue
+        elif mode == 'all':
+            pass # add all events w/o filtering, used for preprocessing
         else:
-            assert False, f'Unknown dataset creation mode.'
+            assert False, f'Unknown dataset creation mode, should be "train", "eval" or "all"'
 
         lf_run_name = event_summary['HEC_RAS_plan'][event_idx]
         lf_filepath = os.path.join(DATASET_PATH, f'HD_model_data/Low-fidelity/Carlisle_LFmodelA.{lf_run_name}.hdf')
@@ -176,5 +178,6 @@ def preprocess_carlisle():
             np.save(f'data/Carlisle/processed/hf_water_depth_event_{i}.npy', f['hf_water_depth'])
 
 if __name__ == '__main__':
-    # make_carlisle_dataset(-1, 'train')
-    preprocess_carlisle()
+    dataset = make_carlisle_dataset(1, 'all')
+    dataset.process()
+    # preprocess_carlisle()

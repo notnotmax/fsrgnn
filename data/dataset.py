@@ -164,12 +164,13 @@ class FloodEventDataset(Dataset):
 
         # ----- create dynamic files -----
         for i, event_id in enumerate(self.event_ids):
-            lf_dynamic_node_features = self._get_lf_dynamic_node_features(i)
-            hf_water_depth, upsampled_water_depth = self._get_hf_dynamic_data(i)
+            print(f'Getting dynamic values for event {event_id}, index {i}.')
+            lf_dynamic_node_features = self._get_lf_dynamic_node_features(event_idx=i)
+            hf_water_depth, upsampled_water_depth = self._get_hf_dynamic_data(event_idx=i)
 
-            np.save(f'data/Carlisle/processed/lf_dynamic_node_features_event_{i}.npy', lf_dynamic_node_features)
-            np.save(f'data/Carlisle/processed/upsampled_water_depth_event_{i}.npy', upsampled_water_depth)
-            np.save(f'data/Carlisle/processed/hf_water_depth_event_{i}.npy', hf_water_depth)
+            np.save(f'data/Carlisle/processed/lf_dynamic_node_features_event_{event_id}.npy', lf_dynamic_node_features)
+            np.save(f'data/Carlisle/processed/upsampled_water_depth_event_{event_id}.npy', upsampled_water_depth)
+            np.save(f'data/Carlisle/processed/hf_water_depth_event_{event_id}.npy', hf_water_depth)
 
             print(f'Saved dynamic values for event {event_id}.')
             del lf_dynamic_node_features, hf_water_depth, upsampled_water_depth
@@ -301,7 +302,6 @@ class FloodEventDataset(Dataset):
         return static_edge_features
 
     def _get_lf_dynamic_node_features(self, event_idx: int):
-        print(f'Getting LF dynamic node features for event index {event_idx}.')
         lf_path = self.lf_hecras_paths[event_idx]
 
         # get ghost cell indices to filter out, assumed to be consistent across runs
@@ -336,7 +336,6 @@ class FloodEventDataset(Dataset):
         return hf_geom['edge_index']
 
     def _get_hf_water_depth_npz(self, event_idx: int):
-        print(f'Getting HF water depth from npz for event index {event_idx}.')
         # expects npz to be preprocessed to remove ghost cells
         hf_path = self.hf_paths[event_idx]
         hf_data = np.load(hf_path)
@@ -347,7 +346,6 @@ class FloodEventDataset(Dataset):
         return hf_water_depth
 
     def _get_hf_water_depth_hecras(self, event_idx: int):
-        print(f'Getting HF water depth from hdf for event index {event_idx}.')
         hf_path = self.hf_paths[event_idx]
 
         # get ghost cell indices to filter out
@@ -360,7 +358,6 @@ class FloodEventDataset(Dataset):
         return hf_water_depth
 
     def _get_hf_dynamic_data(self, event_idx: int):
-        print(f'Getting HF dynamic data for event index {event_idx}.')
         # get lf water surface and upscale
         lf_path = self.lf_hecras_paths[event_idx]
 
@@ -399,6 +396,6 @@ class FloodEventDataset(Dataset):
         dists, nearest_lf_indices = lf_kdtree.query(hf_coords)
         lf_water_level_upscaled = lf_water_level[:, nearest_lf_indices]
 
-        upsampled_water_depth = lf_water_level_upscaled - hf_elevation
+        upsampled_water_depth = np.maximum(0.0, lf_water_level_upscaled - hf_elevation)
 
         return hf_water_depth, upsampled_water_depth
