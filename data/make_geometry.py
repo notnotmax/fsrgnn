@@ -120,7 +120,7 @@ def get_hf_geometry_from_npz(input_path: str, output_path: str):
     mask = (src != dst)
     src = src[mask]
     dst = dst[mask]
-    edge_index = np.vstack([src, dst]).astype(np.int64)
+    edge_index = np.vstack([dst, src]).astype(np.int64) # nearest neighbours should send messages to me
 
     np.savez_compressed(
         output_path,
@@ -153,9 +153,9 @@ if __name__ == '__main__':
     BURNETT_HF_INPUT_PATH = '../dataset/BurnettRV/Geometry_data/Tuflow_Geometry_data.npz'
     BURNETT_HF_OUTPUT_PATH = 'data/BurnettRV/HF_geometry_data.npz'
 
-    get_lf_geometry(CARLISLE_NAME, CARLISLE_LF_INPUT_PATH, CARLISLE_LF_OUTPUT_PATH)
-    lf_data = np.load(CARLISLE_LF_OUTPUT_PATH, allow_pickle=True)
+    # get_lf_geometry(CARLISLE_NAME, CARLISLE_LF_INPUT_PATH, CARLISLE_LF_OUTPUT_PATH)
+    # lf_data = np.load(CARLISLE_LF_OUTPUT_PATH, allow_pickle=True)
 
-    # get_hf_geometry_from_npz(CARLISLE_HF_INPUT_PATH, CARLISLE_HF_OUTPUT_PATH)
+    get_hf_geometry_from_npz(CARLISLE_HF_INPUT_PATH, CARLISLE_HF_OUTPUT_PATH)
     # # get_HF_geometry_from_hecras(CHOWILLA_NAME, CHOWILLA_HF_INPUT_PATH, CHOWILLA_HF_OUTPUT_PATH)
     

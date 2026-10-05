@@ -10,17 +10,17 @@ import pandas as pd
 
 from data.hecras_data_retrieval import get_min_cell_elevation, get_water_level
 
-def get_carlisle_feature_stats(val_group: int):
+def get_feature_stats(area_name: str, val_group: int):
 
-    print(f'Getting Carlisle feature statistics for fold {val_group}.')
-    DATASET_PATH = '../dataset/Carlisle'
-    EVENT_SUMMARY_PATH = os.path.join(DATASET_PATH, 'Carlisle_event_summary.csv')
+    print(f'Getting {area_name} feature statistics for fold {val_group}.')
+    DATASET_PATH = f'../dataset/{area_name}'
+    EVENT_SUMMARY_PATH = os.path.join(DATASET_PATH, f'{area_name}_event_summary.csv')
     event_summary = pd.read_csv(EVENT_SUMMARY_PATH)
 
     num_events = len(event_summary)
     num_groups = np.max(event_summary['Group'])
 
-    ttsplit = np.load(f'../dataset/Carlisle/Train_test_split_data/Train_test_split_ValidateOnGrp_{val_group}.npz')
+    ttsplit = np.load(f'../dataset/{area_name}/Train_test_split_data/Train_test_split_ValidateOnGrp_{val_group}.npz')
     idx_train = ttsplit['idx_train']
 
     lf_water_depths = []
@@ -31,10 +31,16 @@ def get_carlisle_feature_stats(val_group: int):
         if group_id == val_group:
             continue
 
-        lf_run_name = event_summary['HEC_RAS_plan'][event_idx]
-        lf_filepath = os.path.join(DATASET_PATH, f'HD_model_data/Low-fidelity/Carlisle_LFmodelA.{lf_run_name}.hdf')
+        if area_name == 'Carlisle':
+            lf_run_name = event_summary['HEC_RAS_plan'][event_idx]
+            lf_filepath = os.path.join(DATASET_PATH, f'HD_model_data/Low-fidelity/Carlisle_LFmodelA.{lf_run_name}.hdf')
+        if area_name == 'Chowilla':
+            lf_run_name = event_summary['HEC_RAS_plan_LF'][event_idx]
+            lf_filepath = f'../dataset/Chowilla/HD_model_data/Low-fidelity/Chow_LF_modelG.{lf_run_name}.hdf'
+        else:
+            assert False, f"unknown area name {area_name}."
 
-        lf_water_depth = _get_lf_water_depth(lf_filepath, 'Carlisle')
+        lf_water_depth = _get_lf_water_depth(lf_filepath, area_name)
         lf_water_depths.append(lf_water_depth)
 
     # calc stats
@@ -44,14 +50,14 @@ def get_carlisle_feature_stats(val_group: int):
     lf_water_depth_mean = np.mean(lf_water_depths)
     lf_water_depth_std = np.std(lf_water_depths)
 
-    output_path = f'data/Carlisle/feature_stats_fold_{val_group}.npz'
+    output_path = f'data/{area_name}/feature_stats_fold_{val_group}.npz'
     np.savez_compressed(
         output_path,
         lf_water_depth_mean=lf_water_depth_mean,
         lf_water_depth_std=lf_water_depth_std,
     )
 
-    print(f"Saved feature statistics (mean: {lf_water_depth_mean}, std: {lf_water_depth_std}) to {output_path}.")
+    print(f"Saved {area_name} feature statistics (mean: {lf_water_depth_mean}, std: {lf_water_depth_std}) to {output_path}.")
 
 def _get_lf_water_depth(lf_path: str, area_name: str):
     PADDING = 8 # for carlisle
@@ -68,5 +74,5 @@ def _get_lf_water_depth(lf_path: str, area_name: str):
     return lf_water_depth
 
 if __name__ == '__main__':
-    for i in range(1, 10):
-        get_carlisle_feature_stats(val_group=i)
+    for i in range(1, 11):
+        get_feature_stats(area_name='Chowilla', val_group=i)

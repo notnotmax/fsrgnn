@@ -168,9 +168,9 @@ class FloodEventDataset(Dataset):
             lf_dynamic_node_features = self._get_lf_dynamic_node_features(event_idx=i)
             hf_water_depth, upsampled_water_depth = self._get_hf_dynamic_data(event_idx=i)
 
-            np.save(f'data/Carlisle/processed/lf_dynamic_node_features_event_{event_id}.npy', lf_dynamic_node_features)
-            np.save(f'data/Carlisle/processed/upsampled_water_depth_event_{event_id}.npy', upsampled_water_depth)
-            np.save(f'data/Carlisle/processed/hf_water_depth_event_{event_id}.npy', hf_water_depth)
+            np.save(f'{self.processed_dir}/lf_dynamic_node_features_event_{event_id}.npy', lf_dynamic_node_features)
+            np.save(f'{self.processed_dir}/upsampled_water_depth_event_{event_id}.npy', upsampled_water_depth)
+            np.save(f'{self.processed_dir}/hf_water_depth_event_{event_id}.npy', hf_water_depth)
 
             print(f'Saved dynamic values for event {event_id}.')
             del lf_dynamic_node_features, hf_water_depth, upsampled_water_depth
@@ -228,11 +228,11 @@ class FloodEventDataset(Dataset):
 
         data = MultiResolutionData(
             lf_x = lf_x,
-            lf_coords = self.lf_coords,
+            # lf_coords = self.lf_coords,
             lf_edge_index = self.lf_edge_index,
             lf_edge_attr = self.lf_static_edge_features,
             hf_x = hf_x,
-            hf_coords = self.hf_coords,
+            # hf_coords = self.hf_coords,
             hf_edge_index = self.hf_edge_index,
             hf_edge_attr = self.hf_static_edge_features,
             hf_water_depth = hf_water_depth, 

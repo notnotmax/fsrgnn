@@ -33,7 +33,10 @@ class FSRGNN(Module):
         hfgnn_activation: str = 'relu',
         decoder_activation: str = 'relu',
         
+        # misc
+        upsampler_k: int = 4,
         mlp_norm: str = None,
+        residual: bool = False,
         bias: bool = False):
 
         super().__init__()
@@ -87,6 +90,7 @@ class FSRGNN(Module):
             mlp_layers=lfgnn_mlp_layers,
             mlp_norm=mlp_norm,
             activation=lfgnn_activation,
+            residual=residual,
             bias=bias)
 
         self.hfgnn = self._make_gnn(
@@ -99,6 +103,7 @@ class FSRGNN(Module):
             mlp_layers=hfgnn_mlp_layers,
             mlp_norm=mlp_norm,
             activation=hfgnn_activation,
+            residual=residual,
             bias=bias)
         
         self.node_decoder = make_mlp(
@@ -110,16 +115,37 @@ class FSRGNN(Module):
             norm=mlp_norm,
             bias=bias)
 
-        # no edge decoder because we are only interested in node-level regression
+        self.upsampler_k = upsampler_k
+        self.num_lf_nodes = None
+        self.num_hf_nodes = None
+        self.register_buffer('upsampler_neighbour_indices', None, persistent=False)
+        self.register_buffer('upsampler_weights', None, persistent=False)
+    
+    def init_upsampler(self, lf_coords, hf_coords):
+        if self.upsampler_neighbour_indices is not None or self.upsampler_weights is not None:
+            assert False, 'Attempted to initialise upsampler weights twice.'
 
-    def forward(self, lf_x: Tensor, lf_coords: Tensor, lf_edge_index: Tensor, lf_edge_attr: Tensor,
-        hf_x: Tensor, hf_coords: Tensor, hf_edge_index: Tensor, hf_edge_attr: Tensor) -> Tensor:
+        EPS = 1e-8
+        hf_indices, lf_indices = knn(x=lf_coords, y=hf_coords, k=self.upsampler_k)
+        dists = torch.norm(hf_coords[hf_indices] - lf_coords[lf_indices], p=2, dim=-1)
+        w = 1.0 / (dists ** 2 + EPS)
+        w = w.view(-1, self.upsampler_k)
+        lf_indices = lf_indices.view(-1, self.upsampler_k)
+        w = w / (w.sum(dim=-1, keepdim=True) + EPS)
+
+        self.num_lf_nodes = lf_coords.shape[0]
+        self.num_hf_nodes = hf_coords.shape[0]
+        self.upsampler_neighbour_indices = lf_indices
+        self.upsampler_weights = w
+
+    def forward(self, lf_x: Tensor, lf_edge_index: Tensor, lf_edge_attr: Tensor,
+        hf_x: Tensor, hf_edge_index: Tensor, hf_edge_attr: Tensor, num_graphs: int) -> Tensor:
         x_lf = self.node_encoder(lf_x)
         e_lf = self.edge_encoder(lf_edge_attr)
 
         x_lf, _ = self.lfgnn(x_lf, lf_edge_index, e_lf) # ignore edge features because they are not used in upscaling
 
-        x_lf_upsampled = self.upsample(x_lf, lf_coords, hf_coords, k = 4)
+        x_lf_upsampled = self.upsample(x_lf, num_graphs)
 
         x_hf = self.hf_node_encoder(hf_x)
 
@@ -131,29 +157,41 @@ class FSRGNN(Module):
         y_pred = self.node_decoder(x_hf)
         return y_pred
 
-    def upsample(self,
-        x_lf: Tensor, # [N_lf, hidden features]
-        lf_coords: Tensor, # [N_lf, 2]
-        hf_coords: Tensor, # [N_hf, 2]
-        k: int = 4):
+    def upsample(self, x_lf: Tensor, num_graphs: int):
+        device = x_lf.device
 
-        EPS = 1e-8
-        # for each hf node, find k lf neighbours and upsample their hidden features
-        hf_indices, lf_indices = knn(x=lf_coords, y=hf_coords, k=k)
+        # offset each graph's local lf indices into the batch indexing
+        offsets = (torch.arange(num_graphs, device=device) * self.num_lf_nodes).view(num_graphs, 1, 1)
+        idx = (self.upsampler_neighbour_indices.unsqueeze(0) + offsets).reshape(-1, self.upsampler_k) # [B * N_hf, k]
+        w = self.upsampler_weights.unsqueeze(0).expand(num_graphs, -1, -1).reshape(-1, self.upsampler_k) # [B * N_hf, k]
 
-        # inverse distance weighting
-        dists = torch.norm(hf_coords[hf_indices] - lf_coords[lf_indices], p=2, dim=-1)
-        w = 1.0 / (dists ** 2 + EPS)
+        gathered = x_lf[idx] # [B * N_hf, k, h]
+        x_hf_upsampled = torch.sum(gathered * w.unsqueeze(-1), dim=1) # [B * N_hf, h]
+        return x_hf_upsampled
 
-        # reshape to [N_hf, k]
-        w = w.view(-1, k)
-        lf_indices = lf_indices.view(-1, k)
+    # def upsample_old(self,
+    #     x_lf: Tensor, # [N_lf, hidden features]
+    #     lf_coords: Tensor, # [N_lf, 2]
+    #     hf_coords: Tensor, # [N_hf, 2]
+    #     k: int = 4):
 
-        # normalise weights by their sum
-        w = w / (w.sum(dim=-1, keepdim=True) + EPS)
+    #     EPS = 1e-8
+    #     # for each hf node, find k lf neighbours and upsample their hidden features
+    #     hf_indices, lf_indices = knn(x=lf_coords, y=hf_coords, k=k)
 
-        x_hf = torch.sum(x_lf[lf_indices] * w.unsqueeze(-1), dim=1)
-        return x_hf # [N_hf, hidden_features]
+    #     # inverse distance weighting
+    #     dists = torch.norm(hf_coords[hf_indices] - lf_coords[lf_indices], p=2, dim=-1)
+    #     w = 1.0 / (dists ** 2 + EPS)
+
+    #     # reshape to [N_hf, k]
+    #     w = w.view(-1, k)
+    #     lf_indices = lf_indices.view(-1, k)
+
+    #     # normalise weights by their sum
+    #     w = w / (w.sum(dim=-1, keepdim=True) + EPS)
+
+    #     x_hf = torch.sum(x_lf[lf_indices] * w.unsqueeze(-1), dim=1)
+    #     return x_hf # [N_hf, hidden_features]
         
     def _make_gnn(self,
         input_node_size: int,
@@ -165,11 +203,13 @@ class FSRGNN(Module):
         mlp_layers: int,
         activation: str,
         mlp_norm: str,
+        residual: bool,
         bias: bool):
 
         layers = []
 
         if num_gnn_layers == 1:
+            first_layer_residual = residual and (input_node_size == output_node_size) and (input_edge_size == output_edge_size)
             layers.append((
                 NodeEdgeConv(
                     node_in_channels=input_node_size,
@@ -180,12 +220,14 @@ class FSRGNN(Module):
                     num_layers=mlp_layers,
                     activation=activation,
                     mlp_norm=mlp_norm,
+                    residual=first_layer_residual,
                     bias=bias),
                     'x, edge_index, edge_attr -> x, edge_attr'
             ))
 
         else: # multilayer GNN
             layers = []
+            first_layer_residual = residual and (input_node_size == hidden_features) and (input_edge_size == hidden_features)
             layers.append(( # first layer
                 NodeEdgeConv(
                     node_in_channels=input_node_size,
@@ -196,6 +238,7 @@ class FSRGNN(Module):
                     num_layers=mlp_layers,
                     activation=activation,
                     mlp_norm=mlp_norm,
+                    residual=first_layer_residual,
                     bias=bias),
                     'x, edge_index, edge_attr -> x, edge_attr'
             ))
@@ -210,6 +253,7 @@ class FSRGNN(Module):
                         num_layers=mlp_layers,
                         activation=activation,
                         mlp_norm=mlp_norm,
+                        residual=residual,
                         bias=bias),
                     'x, edge_index, edge_attr -> x, edge_attr'
                 ))
@@ -223,6 +267,7 @@ class FSRGNN(Module):
                     num_layers=mlp_layers,
                     activation=activation,
                     mlp_norm=mlp_norm,
+                    residual=residual,
                     bias=bias),
                 'x, edge_index, edge_attr -> x, edge_attr'
             ))
@@ -245,9 +290,12 @@ class NodeEdgeConv(MessagePassing):
         num_layers: int = 2,
         activation: str = 'relu',
         mlp_norm: str = None,
+        residual: bool = False,
         bias: bool = False):
 
         super().__init__(aggr='sum')
+
+        self.residual = residual
         
         self.msg_mlp = make_mlp(
             input_size=node_in_channels * 2 + edge_in_channels,
@@ -268,19 +316,24 @@ class NodeEdgeConv(MessagePassing):
             bias=bias)
 
     def forward(self, x: Tensor, edge_index: Tensor, edge_attr: Tensor) -> Tensor:
-        i, j = edge_index
-        x_i, x_j = x[i], x[j]
+        row, col = edge_index
+        x_i, x_j = x[col], x[row]
 
         # message logic here
         cat_feats = torch.cat([x_i, edge_attr, x_j], dim=-1)
         edge_update = self.msg_mlp(cat_feats)
 
-        node_update = self.propagate(edge_index, msg=edge_update)
+        if self.residual:
+            edge_update = edge_update + edge_attr
+
+        node_update = self.propagate(edge_index, msg=edge_update, x=x)
         return node_update, edge_update
 
     def message(self, msg: Tensor) -> Tensor:
         return msg
 
-    def update(self, aggr: Tensor) -> Tensor:
+    def update(self, aggr: Tensor, x: Tensor) -> Tensor:
         out = self.node_mlp(aggr)
+        if self.residual:
+            out = out + x
         return out

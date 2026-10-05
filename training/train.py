@@ -9,12 +9,12 @@ from torch.utils.data import Subset
 from torch.optim import AdamW
 from torch.optim.lr_scheduler import ReduceLROnPlateau
 from torch_geometric.loader import DataLoader
-from data.make_dataset import make_carlisle_dataset
+from data.make_dataset import make_dataset
 
-def train(mode: str, identifier: str, val_group: int):
+def train(area_name: str, mode: str, identifier: str, val_group: int, epochs_to_do: int):
     DEVICE = torch.device('cuda')
-    NUM_EPOCHS = 10 # num epochs to add, not do until this num of epochs
-    CHECKPOINT_DIR = 'model/Carlisle'
+    NUM_EPOCHS = epochs_to_do # num epochs to add, not do until this num of epochs
+    CHECKPOINT_DIR = f'model/{area_name}'
     CONFIG_PATH = f'{CHECKPOINT_DIR}/{identifier}_config.json'
     LATEST_CHECKPOINT_PATH = f'{CHECKPOINT_DIR}/{identifier}_Val_{val_group}_latest.pt'
     BEST_CHECKPOINT_PATH = f'{CHECKPOINT_DIR}/{identifier}_Val_{val_group}_best.pt'
@@ -41,7 +41,7 @@ def train(mode: str, identifier: str, val_group: int):
             'train_loss': [],
             'val_loss': []
         }
-        print(f'Training new model on Carlisle on validation group {val_group} using config {CONFIG_PATH}.')
+        print(f'Training new model on {area_name} on validation group {val_group} using config {CONFIG_PATH}.')
 
     elif mode == 'continue':
 
@@ -55,7 +55,7 @@ def train(mode: str, identifier: str, val_group: int):
             sch_patience = config['sch_patience']
             t_interval = config['t_interval']
 
-        checkpoint = torch.load(LATEST_CHECKPOINT_PATH, map_location=DEVICE)
+        checkpoint = torch.load(LATEST_CHECKPOINT_PATH, map_location=DEVICE, weights_only=False)
         start_epoch = checkpoint['epoch'] + 1
         best_val_loss = checkpoint['best_val_loss']
         # model_config = checkpoint['model_config']
@@ -70,8 +70,8 @@ def train(mode: str, identifier: str, val_group: int):
         assert False, f'Unknown training mode: {mode}, should be "new" or "continue"'
 
     # ---------- prep datasets/loaders ----------
-    dataset = make_carlisle_dataset(validation_group=val_group, mode='train')
-    ttsplit = np.load(f'../dataset/Carlisle/Train_test_split_data/Train_test_split_ValidateOnGrp_{val_group}.npz')
+    dataset = make_dataset(area_name=area_name, val_group=val_group, mode='train')
+    ttsplit = np.load(f'../dataset/{area_name}/Train_test_split_data/Train_test_split_ValidateOnGrp_{val_group}.npz')
 
     # optionally filter indices to only use every <t_interval> timesteps from each event
     event_ends = np.cumsum(np.asarray(dataset.num_timesteps, dtype=np.int32))
@@ -90,7 +90,9 @@ def train(mode: str, identifier: str, val_group: int):
 
     # ---------- make model ----------
     print('Creating model...')
-    model = FSRGNN(**model_config).to(DEVICE)
+    model = FSRGNN(**model_config)
+    model.init_upsampler(dataset.lf_coords, dataset.hf_coords)
+    model.to(DEVICE)
 
     optimiser = AdamW(model.parameters(), lr=learning_rate, weight_decay=weight_decay)
     scheduler = ReduceLROnPlateau(optimiser, mode='min', factor=sch_factor, patience=sch_patience)
@@ -113,16 +115,16 @@ def train(mode: str, identifier: str, val_group: int):
             optimiser.zero_grad()
             y_residual_pred = model(
                 lf_x = batch.lf_x,
-                lf_coords = batch.lf_coords,
+                # lf_coords = batch.lf_coords,
                 lf_edge_index = batch.lf_edge_index,
                 lf_edge_attr = batch.lf_edge_attr,
                 hf_x = batch.hf_x,
-                hf_coords = batch.hf_coords,
+                # hf_coords = batch.hf_coords,
                 hf_edge_index = batch.hf_edge_index,
-                hf_edge_attr = batch.hf_edge_attr
+                hf_edge_attr = batch.hf_edge_attr,
+                num_graphs = batch.num_graphs
             )
             y_pred = batch.upsampled_water_depth + y_residual_pred
-            # y_pred = torch.clamp(batch.upsampled_water_depth + y_residual_pred, min=0.0)
             loss = masked_loss(
                 y_t = batch.hf_water_depth,
                 y_pred = y_pred,
@@ -139,21 +141,21 @@ def train(mode: str, identifier: str, val_group: int):
         # validation loop
         model.eval()
         total_val_loss = 0.0
-        with torch.no_grad():
+        with torch.inference_mode():
             for batch in val_loader:
                 batch = batch.to(DEVICE)
                 y_residual_pred = model(
                     lf_x = batch.lf_x,
-                    lf_coords = batch.lf_coords,
+                    # lf_coords = batch.lf_coords,
                     lf_edge_index = batch.lf_edge_index,
                     lf_edge_attr = batch.lf_edge_attr,
                     hf_x = batch.hf_x,
-                    hf_coords = batch.hf_coords,
+                    # hf_coords = batch.hf_coords,
                     hf_edge_index = batch.hf_edge_index,
-                    hf_edge_attr = batch.hf_edge_attr
+                    hf_edge_attr = batch.hf_edge_attr,
+                    num_graphs = batch.num_graphs
                 )
                 y_pred = batch.upsampled_water_depth + y_residual_pred
-                # y_pred = torch.clamp(batch.upsampled_water_depth + y_residual_pred, min=0.0)
                 val_loss = masked_loss(
                     y_t = batch.hf_water_depth,
                     y_pred = y_pred,
@@ -224,5 +226,7 @@ def filter_timesteps(indices, event_ends, t_interval):
 
 
 if __name__ == '__main__':
-    print('----- Fixed negative upsampled water depth values, removed clamping during training -----')
-    train(mode='new', identifier='2026-10-02', val_group=1)
+    # print('----- Carlisle, t=2, 6-layer GNNs -----')
+    train(area_name='Carlisle', mode='new', identifier='2026-10-05', val_group=1, epochs_to_do=50) # 1hr10min per 5 epochs?
+    # print('----- Chowilla, t=2, 6-layer GNNs -----')
+    # train(area_name='Chowilla', mode='new', identifier='2026-10-05', val_group=1, epochs_to_do=50)
