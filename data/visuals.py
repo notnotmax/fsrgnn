@@ -73,6 +73,21 @@ def plot_scatter(coords, feature, title, label, output_path):
     print(f'Successfully saved plot at {output_path}')
     plt.close()
 
+def plot_line(x, y, title, xlabel, ylabel, output_path, ylim_bottom = None, ylim_top = None):
+    plt.figure(figsize=(9, 7))
+    plt.plot(x, y)
+    plt.title(title)
+    plt.xlabel(xlabel)
+    plt.ylabel(ylabel)
+    if ylim_bottom:
+        plt.ylim(bottom=ylim_bottom)
+    if ylim_top:
+        plt.ylim(top=ylim_top)
+    plt.tight_layout()
+    plt.savefig(output_path, dpi=300, bbox_inches='tight')
+    print(f'Successfully saved plot at {output_path}')
+    plt.close()
+
 if __name__ == '__main__':
     # CARLISLE_LF_GEOM = np.load(f'data/Carlisle/LF_geometry_data.npz')
     # CARLISLE_HF_GEOM = np.load(f'data/Carlisle/HF_geometry_data.npz')
@@ -80,7 +95,7 @@ if __name__ == '__main__':
     # CHOWILLA_HF_GEOM = np.load(f'data/Chowilla/HF_geometry_data.npz')
     print('Running visualisation...')
 
-    area_name = 'Carlisle'
+    area_name = 'Chowilla'
 
     # hf_elevation = CHOWILLA_HF_GEOM['cell_elevation']
     dataset = make_dataset(area_name=area_name, val_group=1, mode='eval')
@@ -89,21 +104,34 @@ if __name__ == '__main__':
     ups_wd = np.load(f'data/{area_name}/processed/upsampled_water_depth_event_1.npy', mmap_mode='r')[:, wet_idx]
     hf_wd = np.load(f'data/{area_name}/processed/hf_water_depth_event_1.npy', mmap_mode='r')[:, wet_idx]
 
-    ups_wd = np.max(ups_wd, axis=0)
-    hf_wd = np.max(hf_wd, axis=0)
+    # ups_wd = np.max(ups_wd, axis=0)
+    # hf_wd = np.max(hf_wd, axis=0)
+
+    # plot_histogram(
+    #     feature=ups_wd,
+    #     title=f'{area_name}, Event 1 Wet Cells',
+    #     xlabel='Maximum Upsampled Water Depth (m)',
+    #     ylabel='Node Count',
+    #     output_path=f'plots/{area_name}_ups_wd_dist_wet.png'
+    # )
+
+    # plot_histogram(
+    #     feature=hf_wd,
+    #     title=f'{area_name}, Event 1 Wet Cells',
+    #     xlabel='Maximum HF Water Depth (m)',
+    #     ylabel='Node Count',
+    #     output_path=f'plots/{area_name}_hf_wd_dist_wet.png'
+    # )
+
+    error = ups_wd - hf_wd
+    print('Errors < 5:', np.count_nonzero(error < -5.0))
+    print('Errors > 5:', np.count_nonzero(error > 5.0))
+    error = np.clip(error, -5.0, 5.0)
 
     plot_histogram(
-        feature=ups_wd,
-        title=f'{area_name}, Event 1 Wet Cells',
-        xlabel='Maximum Upsampled Water Depth (m)',
+        feature=error.flatten(),
+        title=f'{area_name}, Event 1 Wet Cells, over all timesteps',
+        xlabel='Water Depth Error (m)',
         ylabel='Node Count',
-        output_path=f'plots/{area_name}_ups_wd_dist_wet.png'
-    )
-
-    plot_histogram(
-        feature=hf_wd,
-        title=f'{area_name}, Event 1 Wet Cells',
-        xlabel='Maximum HF Water Depth (m)',
-        ylabel='Node Count',
-        output_path=f'plots/{area_name}_hf_wd_dist_wet.png'
+        output_path=f'plots/{area_name}_clipped_signed_err_wd_dist_wet.png'
     )

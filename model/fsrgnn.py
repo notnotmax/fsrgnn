@@ -168,30 +168,6 @@ class FSRGNN(Module):
         gathered = x_lf[idx] # [B * N_hf, k, h]
         x_hf_upsampled = torch.sum(gathered * w.unsqueeze(-1), dim=1) # [B * N_hf, h]
         return x_hf_upsampled
-
-    # def upsample_old(self,
-    #     x_lf: Tensor, # [N_lf, hidden features]
-    #     lf_coords: Tensor, # [N_lf, 2]
-    #     hf_coords: Tensor, # [N_hf, 2]
-    #     k: int = 4):
-
-    #     EPS = 1e-8
-    #     # for each hf node, find k lf neighbours and upsample their hidden features
-    #     hf_indices, lf_indices = knn(x=lf_coords, y=hf_coords, k=k)
-
-    #     # inverse distance weighting
-    #     dists = torch.norm(hf_coords[hf_indices] - lf_coords[lf_indices], p=2, dim=-1)
-    #     w = 1.0 / (dists ** 2 + EPS)
-
-    #     # reshape to [N_hf, k]
-    #     w = w.view(-1, k)
-    #     lf_indices = lf_indices.view(-1, k)
-
-    #     # normalise weights by their sum
-    #     w = w / (w.sum(dim=-1, keepdim=True) + EPS)
-
-    #     x_hf = torch.sum(x_lf[lf_indices] * w.unsqueeze(-1), dim=1)
-    #     return x_hf # [N_hf, hidden_features]
         
     def _make_gnn(self,
         input_node_size: int,

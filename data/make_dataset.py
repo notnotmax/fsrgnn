@@ -62,6 +62,16 @@ def make_dataset(area_name: str, val_group: int, mode: str):
             hf_filepath = f'{DATASET_PATH}/HD_model_data/High-fidelity/Chow_HF.{hf_run_name}.hdf'
             event_num_timesteps = len(get_event_timesteps(lf_filepath)) # LF and HF have same num of timesteps
 
+        elif area_name == 'BurnettRV':
+            event_id = event_summary['No'][event_idx]
+            lf_run_name = event_summary['HEC_RAS_plan'][event_idx]
+            lf_filepath = f'../dataset/BurnettRV/HD_model_data/Low-fidelity/BurnettRV_LFmodelB.{lf_run_name}.hdf'
+            hf_run_name = event_summary['tuflow_evt_name_old'][event_idx]
+            hf_filepath = f'../dataset/BurnettRV/HD_model_data/High-fidelity/Paradise_{hf_run_name}_002.npz'
+            hf_data = np.load(hf_filepath)
+            hf_timesteps = hf_data['time_data'].shape[0]
+            event_num_timesteps = hf_timesteps - 48 # trim 48 timesteps from the start of each HF run
+
         else:
             assert False, f"Unknown area name {area_name}."
 
@@ -81,6 +91,8 @@ def make_dataset(area_name: str, val_group: int, mode: str):
         hf_filetype = 'npz'
     elif area_name == 'Chowilla':
         hf_filetype = 'hdf'
+    elif area_name == 'BurnettRV':
+        hf_filetype = 'npz'
     else:
         assert False, f'HF filetype for area {area_name} is unknown.'
 
@@ -150,8 +162,8 @@ def get_all_event_timesteps_burnett():
     # for debugging
     EVENT_SUMMARY_PATH = '../dataset/BurnettRV/BurnettRV_event_summary.csv'
     ev_summary = pd.read_csv(EVENT_SUMMARY_PATH)
-    for i in range(15, len(ev_summary)):
-        print(f"----- run {i+1} -----")
+    for i in range(len(ev_summary)):
+        print(f"----- run {i+1} / {len(ev_summary)} -----")
         # get LF timesteps
         lf_run_name = ev_summary['HEC_RAS_plan'][i]
         lf_filepath = f'../dataset/BurnettRV/HD_model_data/Low-fidelity/BurnettRV_LFmodelB.{lf_run_name}.hdf'
@@ -161,10 +173,28 @@ def get_all_event_timesteps_burnett():
         hf_run_name = ev_summary['tuflow_evt_name_old'][i]
         hf_filepath = f'../dataset/BurnettRV/HD_model_data/High-fidelity/Paradise_{hf_run_name}_002.npz'
         hf_data = np.load(hf_filepath)
-        hf_wse = hf_data['wl_data']
-        print('HF timesteps', hf_wse.shape)
+        hf_timesteps = hf_data['time_data']
+        print('HF timesteps', hf_timesteps.shape)
 
 if __name__ == '__main__':
-    dataset = make_dataset(area_name='Carlisle', val_group=1, mode='all')
+    dataset = make_dataset(area_name='BurnettRV', val_group=1, mode='all')
+    print('processing')
+    dataset.process()
+    # area_name = 'Carlisle'
+    # geom = np.load(f'../dataset/BurnettRV/Geometry_data/Tuflow_Geometry_data.npz')
+    # eof_hfdata = np.load(f'../dataset/BurnettRV/HF_EOF_analysis/EOFanalysis_HFdata_WSE_ValidateOnGrp_1.npz')
+    # print(f'eof_hfdata {eof_hfdata.keys()}')
+    # ecs = np.load(f'../dataset/BurnettRV/HF_EOF_analysis/ECs_HFdata_ValidateOnGrp_1.npz')
+    # print(f'ecs {ecs.keys()}')
+    # print(f'shape {ecs['HF_ECs_train_WSE'].shape}')
+    # cats = np.load(f'../dataset/BurnettRV/HF_EOF_analysis/Categories_HFdata_ValidateOnGrp_1.npz')
+    # print(cats.keys())
+    # print(cats['wet_idx'].shape)
+    # hf_wd = np.load(f'data/{area_name}/processed/hf_water_depth_event_1.npy', mmap_mode='r')
+    # print(f'HF WD {hf_wd.shape}')
+    # lf_wd = np.load(f'data/{area_name}/processed/lf_dynamic_node_features_event_1.npy', mmap_mode='r')
+    # print(f'LF WD {lf_wd.shape}')
+    # ups_wd = np.load(f'data/{area_name}/processed/upsampled_water_depth_event_1.npy', mmap_mode='r')
+    # print(f'UPS WD {ups_wd.shape}')
     # dataset.process() # if automatic processing doesn't happen
-    # get_all_event_timesteps_chowilla()
+    # get_all_event_timesteps_burnett()

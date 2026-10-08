@@ -15,6 +15,7 @@ from torch.optim import AdamW
 from torch.optim.lr_scheduler import ReduceLROnPlateau
 from torch_geometric.loader import DataLoader
 from data.make_dataset import make_dataset
+from data.visuals import plot_line
 
 def eval(area_name: str, identifier: str, val_group: int):
     DEVICE = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
@@ -55,20 +56,20 @@ def eval(area_name: str, identifier: str, val_group: int):
         for batch in test_loader:
             batch = batch.to(DEVICE)
 
-            y_residual_pred = model(
-                lf_x = batch.lf_x,
-                # lf_coords = batch.lf_coords,
-                lf_edge_index = batch.lf_edge_index,
-                lf_edge_attr = batch.lf_edge_attr,
-                hf_x = batch.hf_x,
-                # hf_coords = batch.hf_coords,
-                hf_edge_index = batch.hf_edge_index,
-                hf_edge_attr = batch.hf_edge_attr,
-                num_graphs = batch.num_graphs
-            )
+            # y_residual_pred = model(
+            #     lf_x = batch.lf_x,
+            #     # lf_coords = batch.lf_coords,
+            #     lf_edge_index = batch.lf_edge_index,
+            #     lf_edge_attr = batch.lf_edge_attr,
+            #     hf_x = batch.hf_x,
+            #     # hf_coords = batch.hf_coords,
+            #     hf_edge_index = batch.hf_edge_index,
+            #     hf_edge_attr = batch.hf_edge_attr,
+            #     num_graphs = batch.num_graphs
+            # )
 
-            # y_pred = batch.upsampled_water_depth
-            y_pred = torch.clamp(batch.upsampled_water_depth + y_residual_pred, min=0.0)
+            y_pred = batch.upsampled_water_depth
+            # y_pred = torch.clamp(batch.upsampled_water_depth + y_residual_pred, min=0.0)
             y_t = batch.hf_water_depth
 
             # unbatch into 2D shape and filter
@@ -85,10 +86,24 @@ def eval(area_name: str, identifier: str, val_group: int):
 
     hf_wd = np.concatenate(all_y_t, axis=0)
     pred_wd = np.concatenate(all_y_pred, axis=0)
+    hf_bin = convert2binary(hf_wd)
+    pred_bin = convert2binary(pred_wd)
+
+    # CSI per timestep
+    csi_per_t = csi_all_t(hf_bin, pred_bin)    
+    rmse_per_t = np.sqrt(np.mean((pred_wd - hf_wd) ** 2, axis=1))
+
+    t_range = np.arange(len(csi_per_t))
+    # plot_line(t_range, csi_per_t, title='Predicted Water Depth CSI', xlabel='Timestep', ylabel='CSI', ylim_bottom=0, ylim_top=1, \
+    #             output_path=f'model/{area_name}/{identifier}_Val_{val_group}_csi_t.png')
+    plot_line(t_range, rmse_per_t, title='Upsampled Water Depth RMSE', xlabel='Timestep', ylabel='RMSE', ylim_bottom=0, \
+                output_path=f'model/{area_name}/{identifier}_Val_{val_group}_rmse_t.png')
+
+    return
     
     # 1. maximum flood extent (CSI)
-    hf_extent_max = convert2binary(hf_wd).max(axis=0)
-    pred_extent_max = convert2binary(pred_wd).max(axis=0)
+    hf_extent_max = hf_bin.max(axis=0)
+    pred_extent_max = pred_bin.max(axis=0)
     pred_pod, pred_rfa, pred_csi = pod_rfa_1tstep(hf_extent_max, pred_extent_max)
     print(f'Maximum flood extent CSI: {pred_csi:.6f}')
 
@@ -149,6 +164,17 @@ def pod_rfa_1tstep(true_labels, pred_labels):
     return pod_all, rfa_all, csi_all
 
 
+def csi_all_t(true, pred):
+    true = true > 0
+    pred = pred > 0
+    true_pos = (true & pred).sum(axis=1)
+    false_pos = (~true & pred).sum(axis=1)
+    false_neg = (true & ~pred).sum(axis=1)
+    denom = true_pos + false_pos + false_neg
+    csi_all = np.where(denom > 0, true_pos / denom, 1) # set CSI 1 if nothing to predict
+    return csi_all
+
+
 def fidelity_index(true, pred, wd_tol=0.05, time_tol=0.05, time_tol_as_timesteps=False):
     #Check if number of timesteps to shift or fraction of total timesteps
     if time_tol_as_timesteps: 
@@ -186,7 +212,7 @@ def visualise_loss_curves(area_name: str, identifier: str, val_group: int):
     plt.title('Loss Curves')
     plt.xlabel('Epoch')
     plt.ylabel('MSE Loss')
-    plt.ylim(0.03, 0.07) # loss axis
+    # plt.ylim(0.02, 0.07) # loss axis
     plt.legend(frameon=True, loc='upper right')
     plt.tight_layout()
 
@@ -206,11 +232,11 @@ def read_stats(area_name: str, identifier: str, val_group: int):
 
 if __name__ == '__main__':
     print('---------- Evaluating ----------')
-    # visualise_loss_curves(area_name='Carlisle', identifier='2026-10-03', val_group=1)
-    # eval(area_name='Carlisle', identifier='2026-10-03', val_group=1)
+    # visualise_loss_curves(area_name='Carlisle', identifier='2026-10-05', val_group=1)
+    # eval(area_name='Carlisle', identifier='2026-10-05', val_group=1)
     # print('---------- Evaluating 2 ----------')
-    # visualise_loss_curves(area_name='Chowilla', identifier='2026-10-03_small_t2', val_group=1)
-    eval(area_name='Chowilla', identifier='2026-10-03_small_t2', val_group=1)
+    # visualise_loss_curves(area_name='Carlisle', identifier='2026-10-05', val_group=1)
+    eval(area_name='Chowilla', identifier='2026-10-05', val_group=1)
     # read_stats('2026-10-02', val_group=1)
     
     # key format: [index, model]

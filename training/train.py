@@ -135,8 +135,8 @@ def train(area_name: str, mode: str, identifier: str, val_group: int, epochs_to_
             )
             loss.backward()
             optimiser.step()
-            total_train_loss += loss.item()
-        avg_train_loss = total_train_loss / len(train_loader)
+            total_train_loss += loss.detach()
+        avg_train_loss = (total_train_loss / len(train_loader)).item()
 
         # validation loop
         model.eval()
@@ -164,8 +164,8 @@ def train(area_name: str, mode: str, identifier: str, val_group: int, epochs_to_
                     wet_idx = wet_idx,
                     loss_func = loss_func
                 )
-                total_val_loss += val_loss.item()
-            avg_val_loss = total_val_loss / len(val_loader)
+                total_val_loss += val_loss.detach()
+            avg_val_loss = (total_val_loss / len(val_loader)).item()
 
         scheduler.step(avg_val_loss)
         print(f'Epoch {epoch}, Train loss {avg_train_loss:.6f}, Validation loss {avg_val_loss:.6f}')
@@ -227,6 +227,8 @@ def filter_timesteps(indices, event_ends, t_interval):
 
 if __name__ == '__main__':
     # print('----- Carlisle, t=2, 6-layer GNNs -----')
-    train(area_name='Carlisle', mode='new', identifier='2026-10-05', val_group=1, epochs_to_do=50) # 1hr10min per 5 epochs?
+    # train(area_name='Carlisle', mode='continue', identifier='2026-10-05', val_group=1, epochs_to_do=50) # 1hr10min per 5 epochs?
     # print('----- Chowilla, t=2, 6-layer GNNs -----')
     # train(area_name='Chowilla', mode='new', identifier='2026-10-05', val_group=1, epochs_to_do=50)
+    print('----- BurnettRV, t=2, 6-layer GNNs -----')
+    train(area_name='BurnettRV', mode='new', identifier='2026-10-08', val_group=1, epochs_to_do=50)
