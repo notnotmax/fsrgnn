@@ -31,12 +31,17 @@ def eval(area_name: str, identifier: str, val_group: int):
 
     # ---------- prep datasets/loaders ----------
     test_dataset = make_dataset(area_name=area_name, val_group=val_group, mode='eval')
-    test_loader = DataLoader(test_dataset, batch_size=2, shuffle=False, num_workers=4)
+    test_loader = DataLoader(
+        test_dataset,
+        batch_size=4,
+        shuffle=False,
+        num_workers=4,
+        pin_memory=True)
 
     # ---------- make model ----------
     print('Creating model...')
     model = FSRGNN(**model_config)
-    model.init_upsampler(test_dataset.lf_coords, test_dataset.hf_coords)
+    model.init_static_features(test_dataset.STATIC_FEATURES_PATH)
     model.to(DEVICE)
     model.load_state_dict(model_state_dict)
     model.eval()
@@ -44,94 +49,116 @@ def eval(area_name: str, identifier: str, val_group: int):
     wet_idx = test_dataset.wet_idx.to(DEVICE)
     n_wet = wet_idx.numel()
 
-    sum_sq_error_pred = torch.zeros(n_wet, device=DEVICE)
-    total_t = 0
     all_y_pred = []
     all_y_t = []
 
     print('Evaluating...')
+
     with torch.inference_mode():
-        num_hf_nodes = test_dataset.hf_coords.shape[0]
+        num_hf_nodes = test_dataset.num_hf_nodes
 
         for batch in test_loader:
             batch = batch.to(DEVICE)
 
-            # y_residual_pred = model(
-            #     lf_x = batch.lf_x,
-            #     # lf_coords = batch.lf_coords,
-            #     lf_edge_index = batch.lf_edge_index,
-            #     lf_edge_attr = batch.lf_edge_attr,
-            #     hf_x = batch.hf_x,
-            #     # hf_coords = batch.hf_coords,
-            #     hf_edge_index = batch.hf_edge_index,
-            #     hf_edge_attr = batch.hf_edge_attr,
-            #     num_graphs = batch.num_graphs
-            # )
+            y_residual_pred = model(
+                lf_dyn = batch.lf_dyn,
+                batch_size = batch.num_graphs
+            )
 
-            y_pred = batch.upsampled_water_depth
-            # y_pred = torch.clamp(batch.upsampled_water_depth + y_residual_pred, min=0.0)
+            # y_pred = batch.upsampled_water_depth
+            y_pred = torch.clamp(batch.upsampled_water_depth + y_residual_pred, min=0.0)
             y_t = batch.hf_water_depth
 
             # unbatch into 2D shape and filter
             y_pred_grid = y_pred.view(batch.num_graphs, num_hf_nodes)[:, wet_idx]
             y_t_grid = y_t.view(batch.num_graphs, num_hf_nodes)[:, wet_idx]
 
-            sum_sq_error_pred += ((y_pred_grid - y_t_grid) ** 2).sum(dim=0)
-            total_t += batch.num_graphs
-
             all_y_pred.append(y_pred_grid.cpu().numpy())
             all_y_t.append(y_t_grid.cpu().numpy())
 
     # ---------- metrics ----------
 
-    hf_wd = np.concatenate(all_y_t, axis=0)
-    pred_wd = np.concatenate(all_y_pred, axis=0)
-    hf_bin = convert2binary(hf_wd)
-    pred_bin = convert2binary(pred_wd)
+    hf_all = np.concatenate(all_y_t, axis=0)
+    pred_all = np.concatenate(all_y_pred, axis=0)
 
-    # CSI per timestep
-    csi_per_t = csi_all_t(hf_bin, pred_bin)    
-    rmse_per_t = np.sqrt(np.mean((pred_wd - hf_wd) ** 2, axis=1))
+    event_lengths = np.asarray(test_dataset.num_timesteps, dtype=np.int32)
 
-    t_range = np.arange(len(csi_per_t))
-    # plot_line(t_range, csi_per_t, title='Predicted Water Depth CSI', xlabel='Timestep', ylabel='CSI', ylim_bottom=0, ylim_top=1, \
-    #             output_path=f'model/{area_name}/{identifier}_Val_{val_group}_csi_t.png')
-    plot_line(t_range, rmse_per_t, title='Upsampled Water Depth RMSE', xlabel='Timestep', ylabel='RMSE', ylim_bottom=0, \
-                output_path=f'model/{area_name}/{identifier}_Val_{val_group}_rmse_t.png')
+    # if event_lengths.sum() != hf_all.shape[0]:
+    #     raise ValueError(
+    #         f"Event lengths sum to {event_lengths.sum()}, "
+    #         f"but collected {hf_all.shape[0]} timesteps."
+    #     )
 
-    return
-    
-    # 1. maximum flood extent (CSI)
-    hf_extent_max = hf_bin.max(axis=0)
-    pred_extent_max = pred_bin.max(axis=0)
-    pred_pod, pred_rfa, pred_csi = pod_rfa_1tstep(hf_extent_max, pred_extent_max)
-    print(f'Maximum flood extent CSI: {pred_csi:.6f}')
-
-    # 2. peak water depth R2 and avg diff
-    hf_max_wd = np.max(hf_wd, axis=0)
-    pred_max_wd = np.max(pred_wd, axis=0)
-    max_wd_r2 = r2_score(hf_max_wd, pred_max_wd)
-    avg_peak_diff = np.mean(hf_max_wd - pred_max_wd)
-    print(f'Max water depth R2: {max_wd_r2:.6f}')
-    print(f'Average peak water depth difference: {avg_peak_diff:.6f}')
-
-    # 3. RMSE
-    pred_mse_per_node = (sum_sq_error_pred / total_t).cpu().numpy()
-    pred_rmse = np.mean(np.sqrt(pred_mse_per_node))
-    print(f'Prediction RMSE: {pred_rmse:.6f}')
-
-    # 4. fidelity index
-    pred_fi = fidelity_index(true=hf_wd, pred=pred_wd)
-    print(f'Fidelity Index: {pred_fi:.6f}')
+    event_ids = test_dataset.event_ids
+    assert len(event_ids) == len(event_lengths)
 
     metrics = {
-        'epoch': epoch,
-        'max_csi': float(pred_csi),
-        'max_wd_r2': float(max_wd_r2),
-        'avg_peak_diff': float(avg_peak_diff),
-        'rmse': float(pred_rmse),
-        'fi': float(pred_fi)
+        'epoch': int(epoch),
+        'events': []
     }
+
+    # run evaluation per event in this validation group
+    start_t = 0
+    for event_idx, (event_id, event_length) in enumerate(zip(event_ids, event_lengths)):
+
+        # extract timesteps from this event only
+        end_t = start_t + int(event_length)
+        hf_wd = hf_all[start_t:end_t]
+        pred_wd = pred_all[start_t:end_t]
+        start_t = end_t
+
+        hf_bin = convert2binary(hf_wd)
+        pred_bin = convert2binary(pred_wd)
+
+        # CSI and RMSE over time
+        csi_per_t = csi_all_t(hf_bin, pred_bin)
+        squared_error = (pred_wd - hf_wd) ** 2
+        rmse_per_t = np.sqrt(np.mean(squared_error, axis=1))
+
+        t_range = np.arange(int(event_length))
+        plot_line(t_range, csi_per_t, title=f'Upsampled Water Depth CSI (Event {event_id})', xlabel='Timestep', ylabel='CSI', \
+            ylim_bottom=0, ylim_top=1, output_path=f'model/{area_name}/{identifier}_Ev_{event_id}_csi_t.png')
+        plot_line(t_range, rmse_per_t, title=f'Upsampled Water Depth RMSE (Event {event_id})', xlabel='Timestep', ylabel='RMSE',
+            ylim_bottom=0, output_path=f'model/{area_name}/{identifier}_Ev_{event_id}_rmse_t.png')
+    
+        # 1. maximum flood extent (CSI)
+        hf_extent_max = hf_bin.max(axis=0)
+        pred_extent_max = pred_bin.max(axis=0)
+        _, _, pred_csi = pod_rfa_1tstep(hf_extent_max, pred_extent_max)
+
+        # 2. peak water depth R2 and avg diff
+        hf_max_wd = np.max(hf_wd, axis=0)
+        pred_max_wd = np.max(pred_wd, axis=0)
+        max_wd_r2 = r2_score(hf_max_wd, pred_max_wd)
+        avg_peak_diff = np.mean(hf_max_wd - pred_max_wd)
+
+        # 3. RMSE
+        pred_rmse = np.mean(np.sqrt(np.mean(squared_error, axis=0)))
+
+        # 4. fidelity index
+        pred_fi = fidelity_index(true=hf_wd, pred=pred_wd)
+
+        event_metrics = {
+            "event_id": str(event_id),
+            "num_timesteps": int(event_length),
+            "max_csi": float(pred_csi),
+            "max_wd_r2": float(max_wd_r2),
+            "avg_peak_diff": float(avg_peak_diff),
+            "rmse": float(pred_rmse),
+            "fi": float(pred_fi),
+        }
+        metrics["events"].append(event_metrics)
+
+        print(
+            f'Event {event_id}:\n'
+            f'Maximum flood extent CSI: {pred_csi:.6f}\n'
+            f'Max water depth R2: {max_wd_r2:.6f}\n'
+            f'Average peak water depth difference: {avg_peak_diff:.6f}\n'
+            f'Prediction RMSE: {pred_rmse:.6f}\n'
+            f'Fidelity Index: {pred_fi:.6f}\n'
+        )
+
+        break # TODO
 
     with open(METRICS_PATH, 'w') as f:
         json.dump(metrics, f, indent=4)
@@ -236,7 +263,8 @@ if __name__ == '__main__':
     # eval(area_name='Carlisle', identifier='2026-10-05', val_group=1)
     # print('---------- Evaluating 2 ----------')
     # visualise_loss_curves(area_name='Carlisle', identifier='2026-10-05', val_group=1)
-    eval(area_name='Chowilla', identifier='2026-10-05', val_group=1)
+    # eval(area_name='Chowilla', identifier='2026-10-05', val_group=1)
+    eval(area_name='BurnettRV', identifier='2026-10-08', val_group=1)
     # read_stats('2026-10-02', val_group=1)
     
     # key format: [index, model]

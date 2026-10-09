@@ -1,6 +1,7 @@
 import json
 import numpy as np
 import os
+import time
 import torch
 import torch.nn as nn
 
@@ -58,13 +59,13 @@ def train(area_name: str, mode: str, identifier: str, val_group: int, epochs_to_
         checkpoint = torch.load(LATEST_CHECKPOINT_PATH, map_location=DEVICE, weights_only=False)
         start_epoch = checkpoint['epoch'] + 1
         best_val_loss = checkpoint['best_val_loss']
-        # model_config = checkpoint['model_config']
         model_state_dict = checkpoint['model_state_dict']
         optimiser_state_dict = checkpoint['optimiser_state_dict']
         scheduler_state_dict = checkpoint['scheduler_state_dict']
 
         with open(LOSS_STATS_PATH, 'r') as f:
             loss_stats = json.load(f)
+        print(f'Resuming training of model on {area_name} on validation group {val_group} using config {CONFIG_PATH}.')
 
     else:
         assert False, f'Unknown training mode: {mode}, should be "new" or "continue"'
@@ -81,18 +82,30 @@ def train(area_name: str, mode: str, identifier: str, val_group: int, epochs_to_
 
     train_dataset = Subset(dataset, idx_train)
     val_dataset = Subset(dataset, idx_val)
-    train_loader = DataLoader(train_dataset, batch_size=batch_size, shuffle=False, num_workers=4, persistent_workers=True) # already shuffled in ttsplit
-    val_loader = DataLoader(val_dataset, batch_size=batch_size, shuffle=False, num_workers=4, persistent_workers=True)
+    train_loader = DataLoader(
+        train_dataset,
+        batch_size=batch_size,
+        shuffle=False,
+        num_workers=min(batch_size, 4),
+        persistent_workers=True,
+        pin_memory=True)
+    val_loader = DataLoader(
+        val_dataset,
+        batch_size=batch_size,
+        shuffle=False,
+        num_workers=min(batch_size, 4),
+        persistent_workers=True,
+        pin_memory=True)
 
     # constants for this fold/validation group
     wet_idx = dataset.wet_idx.to(DEVICE)
-    num_hf_nodes = dataset.hf_coords.shape[0]
 
     # ---------- make model ----------
     print('Creating model...')
     model = FSRGNN(**model_config)
-    model.init_upsampler(dataset.lf_coords, dataset.hf_coords)
+    model.init_static_features(dataset.STATIC_FEATURES_PATH)
     model.to(DEVICE)
+    num_hf_nodes = model.num_hf_nodes
 
     optimiser = AdamW(model.parameters(), lr=learning_rate, weight_decay=weight_decay)
     scheduler = ReduceLROnPlateau(optimiser, mode='min', factor=sch_factor, patience=sch_patience)
@@ -114,15 +127,8 @@ def train(area_name: str, mode: str, identifier: str, val_group: int, epochs_to_
             batch = batch.to(DEVICE)
             optimiser.zero_grad()
             y_residual_pred = model(
-                lf_x = batch.lf_x,
-                # lf_coords = batch.lf_coords,
-                lf_edge_index = batch.lf_edge_index,
-                lf_edge_attr = batch.lf_edge_attr,
-                hf_x = batch.hf_x,
-                # hf_coords = batch.hf_coords,
-                hf_edge_index = batch.hf_edge_index,
-                hf_edge_attr = batch.hf_edge_attr,
-                num_graphs = batch.num_graphs
+                lf_dyn = batch.lf_dyn,
+                batch_size = batch.num_graphs
             )
             y_pred = batch.upsampled_water_depth + y_residual_pred
             loss = masked_loss(
@@ -145,16 +151,9 @@ def train(area_name: str, mode: str, identifier: str, val_group: int, epochs_to_
             for batch in val_loader:
                 batch = batch.to(DEVICE)
                 y_residual_pred = model(
-                    lf_x = batch.lf_x,
-                    # lf_coords = batch.lf_coords,
-                    lf_edge_index = batch.lf_edge_index,
-                    lf_edge_attr = batch.lf_edge_attr,
-                    hf_x = batch.hf_x,
-                    # hf_coords = batch.hf_coords,
-                    hf_edge_index = batch.hf_edge_index,
-                    hf_edge_attr = batch.hf_edge_attr,
-                    num_graphs = batch.num_graphs
-                )
+                lf_dyn = batch.lf_dyn,
+                batch_size = batch.num_graphs
+            )
                 y_pred = batch.upsampled_water_depth + y_residual_pred
                 val_loss = masked_loss(
                     y_t = batch.hf_water_depth,
@@ -227,8 +226,8 @@ def filter_timesteps(indices, event_ends, t_interval):
 
 if __name__ == '__main__':
     # print('----- Carlisle, t=2, 6-layer GNNs -----')
-    # train(area_name='Carlisle', mode='continue', identifier='2026-10-05', val_group=1, epochs_to_do=50) # 1hr10min per 5 epochs?
+    # train(area_name='Carlisle', mode='new', identifier='2026-10-06', val_group=1, epochs_to_do=1) # 1hr10min per 5 epochs?
     # print('----- Chowilla, t=2, 6-layer GNNs -----')
     # train(area_name='Chowilla', mode='new', identifier='2026-10-05', val_group=1, epochs_to_do=50)
-    print('----- BurnettRV, t=2, 6-layer GNNs -----')
+    print('----- BurnettRV, t=4, 6-layer GNNs -----')
     train(area_name='BurnettRV', mode='new', identifier='2026-10-08', val_group=1, epochs_to_do=50)

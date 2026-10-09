@@ -71,7 +71,6 @@ class FloodEventDataset(Dataset):
         self.HF_WATER_DEPTH_PATHS = [os.path.join(self.processed_dir, f'hf_water_depth_event_{event_id}.npy') \
                                         for event_id in self.event_ids]
 
-
         self.CAT_DATA_PATH = cat_data_path
         self.FEATURE_STATS_PATH = feature_stats_path
 
@@ -85,42 +84,14 @@ class FloodEventDataset(Dataset):
         # post-process call one-time loading of static features to reduce loading from disk
         static_features = np.load(self.STATIC_FEATURES_PATH)
 
-        self.lf_coords = torch.from_numpy(static_features['lf_coords']).float()
-        self.lf_edge_index = torch.from_numpy(static_features['lf_edge_index']).long()
-        self.lf_static_node_features = torch.from_numpy(static_features['lf_static_node_features']).float()
-        self.lf_static_edge_features = torch.from_numpy(static_features['lf_static_edge_features']).float()
-
-        self.hf_coords = torch.from_numpy(static_features['hf_coords']).float()
-        self.hf_edge_index = torch.from_numpy(static_features['hf_edge_index']).long()
-        self.hf_static_node_features = torch.from_numpy(static_features['hf_static_node_features']).float()
-        self.hf_static_edge_features = torch.from_numpy(static_features['hf_static_edge_features']).float()
+        self.num_lf_nodes = static_features['lf_coords'].shape[0]
+        self.num_hf_nodes = static_features['hf_coords'].shape[0]
 
         # get wet cells
         cat_data = np.load(self.CAT_DATA_PATH, allow_pickle=True)
         self.wet_idx = torch.from_numpy(cat_data['wet_idx']).long()
 
-        # ---------- feature normalisation ----------
-
-        # normalise static features (geometry), assuming they never change across timesteps and between train/test splits
-        EPS = 1e-8
-
-        lf_node_mean = self.lf_static_node_features.mean(dim=0, keepdim=True)
-        lf_node_std = self.lf_static_node_features.std(dim=0, keepdim=True)
-        self.lf_static_node_features = (self.lf_static_node_features - lf_node_mean) / (lf_node_std + EPS)
-
-        lf_edge_mean = self.lf_static_edge_features.mean(dim=0, keepdim=True)
-        lf_edge_std = self.lf_static_edge_features.std(dim=0, keepdim=True)
-        self.lf_static_edge_features = (self.lf_static_edge_features - lf_edge_mean) / (lf_edge_std + EPS)
-
-        hf_node_mean = self.hf_static_node_features.mean(dim=0, keepdim=True)
-        hf_node_std = self.hf_static_node_features.std(dim=0, keepdim=True)
-        self.hf_static_node_features = (self.hf_static_node_features - hf_node_mean) / (hf_node_std + EPS)
-
-        hf_edge_mean = self.hf_static_edge_features.mean(dim=0, keepdim=True)
-        hf_edge_std = self.hf_static_edge_features.std(dim=0, keepdim=True)
-        self.hf_static_edge_features = (self.hf_static_edge_features - hf_edge_mean) / (hf_edge_std + EPS)
-
-        # load dynamic feature statistics for this fold
+        # load dynamic feature statistics for this fold for normalisation
         feature_stats = np.load(self.FEATURE_STATS_PATH)
         self.lf_dyn_mean = feature_stats['lf_water_depth_mean']
         self.lf_dyn_std = feature_stats['lf_water_depth_std']
@@ -224,25 +195,15 @@ class FloodEventDataset(Dataset):
         
         lf_dynamic_node_features = (lf_dynamic_node_features - self.lf_dyn_mean) / self.lf_dyn_std
 
-        lf_x = torch.cat([self.lf_static_node_features, lf_dynamic_node_features], dim=-1)
-        hf_x = self.hf_static_node_features # no hf dynamic node features are given
-
         data = MultiResolutionData(
-            lf_x = lf_x,
-            # lf_coords = self.lf_coords,
-            lf_edge_index = self.lf_edge_index,
-            lf_edge_attr = self.lf_static_edge_features,
-            hf_x = hf_x,
-            # hf_coords = self.hf_coords,
-            hf_edge_index = self.hf_edge_index,
-            hf_edge_attr = self.hf_static_edge_features,
+            lf_dyn = lf_dynamic_node_features,
             hf_water_depth = hf_water_depth, 
             upsampled_water_depth = upsampled_water_depth, # to use in reconstruction after predicting the residual
 
             # for PyG
-            num_nodes = hf_x.size(0),
-            lf_num_nodes = lf_x.size(0),
-            hf_num_nodes = hf_x.size(0)
+            num_nodes = self.num_hf_nodes,
+            lf_num_nodes = self.num_lf_nodes,
+            hf_num_nodes = self.num_hf_nodes
         )
         
         return data

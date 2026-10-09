@@ -1,12 +1,13 @@
 # Adapted from https://github.com/acostacos/dual_flood_gnn
 
+import numpy as np
 import torch
 from torch import Tensor
 from torch.nn import Module
 from torch_cluster import knn
 from torch_geometric.nn import MessagePassing, Sequential as PygSequential
 from typing import Tuple
-from utils.model_utils import make_mlp
+from model.model_utils import make_mlp
 
 class FSRGNN(Module):
 
@@ -118,44 +119,109 @@ class FSRGNN(Module):
         self.upsampler_k = upsampler_k
         self.num_lf_nodes = None
         self.num_hf_nodes = None
+        self._edge_cache = {}
+
+        self.register_buffer('lf_coords', None, persistent=False)
+        self.register_buffer('lf_edge_index', None, persistent=False)
+        self.register_buffer('lf_static_x', None, persistent=False)
+        self.register_buffer('lf_edge_attr', None, persistent=False)
+
+        self.register_buffer('hf_coords', None, persistent=False)
+        self.register_buffer('hf_edge_index', None, persistent=False)
+        self.register_buffer('hf_static_x', None, persistent=False)
+        self.register_buffer('hf_edge_attr', None, persistent=False)
+
         self.register_buffer('upsampler_neighbour_indices', None, persistent=False)
         self.register_buffer('upsampler_weights', None, persistent=False)
+
+    def init_static_features(self, static_features_path: str):
+        if self.lf_coords is not None:
+            assert False, 'Attempted to initialise static features twice.'
+        static_features = np.load(static_features_path)
+
+        self.lf_coords = torch.from_numpy(static_features['lf_coords']).float()
+        self.num_lf_nodes = self.lf_coords.size(0)
+        self.lf_edge_index = torch.from_numpy(static_features['lf_edge_index']).long()
+        self.lf_static_x = self._standardise(
+            torch.from_numpy(static_features['lf_static_node_features']).float())
+        self.lf_edge_attr = self._standardise(
+            torch.from_numpy(static_features['lf_static_edge_features']).float())
+
+        self.hf_coords = torch.from_numpy(static_features['hf_coords']).float()
+        self.num_hf_nodes = self.hf_coords.size(0)
+        self.hf_edge_index = torch.from_numpy(static_features['hf_edge_index']).long()
+        self.hf_static_x = self._standardise(
+            torch.from_numpy(static_features['hf_static_node_features']).float())
+        self.hf_edge_attr = self._standardise(
+            torch.from_numpy(static_features['hf_static_edge_features']).float())
+
+        self._init_upsampler(self.lf_coords, self.hf_coords)
+
+    def _standardise(self, x: Tensor, eps: float=1e-8):
+        mean = x.mean(dim=0, keepdim=True)
+        std = x.std(dim=0, keepdim=True)
+        return (x - mean) / (std + eps)
     
-    def init_upsampler(self, lf_coords, hf_coords):
+    def _init_upsampler(self, lf_coords, hf_coords, eps: float=1e-8):
         if self.upsampler_neighbour_indices is not None or self.upsampler_weights is not None:
             assert False, 'Attempted to initialise upsampler weights twice.'
 
-        EPS = 1e-8
         hf_indices, lf_indices = knn(x=lf_coords, y=hf_coords, k=self.upsampler_k)
         dists = torch.norm(hf_coords[hf_indices] - lf_coords[lf_indices], p=2, dim=-1)
-        w = 1.0 / (dists ** 2 + EPS)
+        w = 1.0 / (dists ** 2 + eps)
         w = w.view(-1, self.upsampler_k)
         lf_indices = lf_indices.view(-1, self.upsampler_k)
-        w = w / (w.sum(dim=-1, keepdim=True) + EPS)
+        w = w / (w.sum(dim=-1, keepdim=True) + eps)
 
-        self.num_lf_nodes = lf_coords.shape[0]
-        self.num_hf_nodes = hf_coords.shape[0]
         self.upsampler_neighbour_indices = lf_indices
         self.upsampler_weights = w
 
-    def forward(self, lf_x: Tensor, lf_edge_index: Tensor, lf_edge_attr: Tensor,
-        hf_x: Tensor, hf_edge_index: Tensor, hf_edge_attr: Tensor, num_graphs: int) -> Tensor:
+    def _batched_edges(self, name: str, num_nodes: int, batch_size: int):
+        key = (name, batch_size)
+        if key not in self._edge_cache:
+            edge_index = getattr(self, name)
+            off = (torch.arange(batch_size, device=edge_index.device) * num_nodes).view(batch_size, 1, 1)
+            self._edge_cache[key] = (edge_index.unsqueeze(0) + off).permute(1, 0, 2).reshape(2, -1)
+        return self._edge_cache[key]
+
+    def forward(self, lf_dyn: Tensor, batch_size: int) -> Tensor:
+        lf_x = torch.cat([self.lf_static_x.repeat(batch_size, 1), lf_dyn], dim=-1)
         x_lf = self.node_encoder(lf_x)
-        e_lf = self.edge_encoder(lf_edge_attr)
-
-        x_lf, _ = self.lfgnn(x_lf, lf_edge_index, e_lf) # ignore edge features because they are not used in upscaling
-
-        x_lf_upsampled = self.upsample(x_lf, num_graphs)
-
-        x_hf = self.hf_node_encoder(hf_x)
-
-        x_hf_combined = torch.cat([x_lf_upsampled, x_hf], dim=-1)
-
-        e_hf = self.hf_edge_encoder(hf_edge_attr)
-        x_hf, _ = self.hfgnn(x_hf_combined, hf_edge_index, e_hf)
-
+        e_lf = self.edge_encoder(self.lf_edge_attr).repeat(batch_size, 1)
+        x_lf, _ = self.lfgnn(
+            x_lf,
+            self._batched_edges('lf_edge_index', self.num_lf_nodes, batch_size),
+            e_lf
+        )
+        x_ups = self.upsample(x_lf, batch_size)
+        x_hf = self.hf_node_encoder(self.hf_static_x).repeat(batch_size, 1)
+        e_hf = self.hf_edge_encoder(self.hf_edge_attr).repeat(batch_size, 1)
+        x_hf, _ = self.hfgnn(
+            torch.cat([x_ups, x_hf], dim=-1),
+            self._batched_edges('hf_edge_index', self.num_hf_nodes, batch_size),
+            e_hf
+        )
         y_pred = self.node_decoder(x_hf)
         return y_pred
+
+    # def forward_old(self, lf_x: Tensor, lf_edge_index: Tensor, lf_edge_attr: Tensor,
+    #     hf_x: Tensor, hf_edge_index: Tensor, hf_edge_attr: Tensor, num_graphs: int) -> Tensor:
+    #     x_lf = self.node_encoder(lf_x)
+    #     e_lf = self.edge_encoder(lf_edge_attr)
+
+    #     x_lf, _ = self.lfgnn(x_lf, lf_edge_index, e_lf) # ignore edge features because they are not used in upscaling
+
+    #     x_lf_upsampled = self.upsample(x_lf, num_graphs)
+
+    #     x_hf = self.hf_node_encoder(hf_x)
+
+    #     x_hf_combined = torch.cat([x_lf_upsampled, x_hf], dim=-1)
+
+    #     e_hf = self.hf_edge_encoder(hf_edge_attr)
+    #     x_hf, _ = self.hfgnn(x_hf_combined, hf_edge_index, e_hf)
+
+    #     y_pred = self.node_decoder(x_hf)
+    #     return y_pred
 
     def upsample(self, x_lf: Tensor, num_graphs: int):
         device = x_lf.device
