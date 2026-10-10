@@ -108,15 +108,14 @@ def make_dataset(area_name: str, val_group: int, mode: str):
         feature_stats_path = feature_stats_path,
         event_ids = event_ids,
         group_ids = group_ids,
-        num_timesteps = num_timesteps,
-        previous_timesteps = 0
+        num_timesteps = num_timesteps
     )
 
     print(f'Made {area_name} dataset, contains total {len(dataset)} timesteps.')
 
     return dataset
 
-def get_all_event_timesteps_carlisle():
+def _get_all_event_timesteps_carlisle():
     # CARLISLE always has time difference 8 between LF and HF runs
 
     # for debugging
@@ -136,7 +135,7 @@ def get_all_event_timesteps_carlisle():
         hf_wse = hf_data['wse_data']
         print('HF timesteps', hf_wse.shape)
 
-def get_all_event_timesteps_chowilla():
+def _get_all_event_timesteps_chowilla():
     print('Getting Chowilla timestep lengths.')
 
     # for debugging
@@ -156,9 +155,7 @@ def get_all_event_timesteps_chowilla():
         hf_timesteps = get_event_timesteps(hf_filepath)
         print(f'HF timesteps: {len(hf_timesteps)}, first timesteps: {hf_timesteps[0:3]}')
 
-def get_all_event_timesteps_burnett():
-    # burnett has 2 more timesteps in LF than HF
-
+def _get_all_event_timesteps_burnett():
     # for debugging
     EVENT_SUMMARY_PATH = '../dataset/BurnettRV/BurnettRV_event_summary.csv'
     ev_summary = pd.read_csv(EVENT_SUMMARY_PATH)

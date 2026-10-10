@@ -8,14 +8,15 @@ import torch
 import torch.nn as nn
 
 from data.dataset import FloodEventDataset
-from model.fsrgnn import FSRGNN
+from data.make_dataset import make_dataset
+from data.visuals import plot_line
+from model.fsrgnnimport FSRGNN
 from sklearn.metrics import r2_score
 from torch.utils.data import Subset
 from torch.optim import AdamW
 from torch.optim.lr_scheduler import ReduceLROnPlateau
 from torch_geometric.loader import DataLoader
-from data.make_dataset import make_dataset
-from data.visuals import plot_line
+
 
 def eval(area_name: str, identifier: str, val_group: int):
     DEVICE = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
@@ -60,10 +61,11 @@ def eval(area_name: str, identifier: str, val_group: int):
         for batch in test_loader:
             batch = batch.to(DEVICE)
 
-            y_residual_pred = model(
-                lf_dyn = batch.lf_dyn,
-                batch_size = batch.num_graphs
-            )
+            with torch.autocast(device_type='cuda', dtype=torch.bfloat16):
+                y_residual_pred = model(
+                    lf_dyn = batch.lf_dyn,
+                    batch_size = batch.num_graphs
+                )
 
             # y_pred = batch.upsampled_water_depth
             y_pred = torch.clamp(batch.upsampled_water_depth + y_residual_pred, min=0.0)
@@ -83,11 +85,8 @@ def eval(area_name: str, identifier: str, val_group: int):
 
     event_lengths = np.asarray(test_dataset.num_timesteps, dtype=np.int32)
 
-    # if event_lengths.sum() != hf_all.shape[0]:
-    #     raise ValueError(
-    #         f"Event lengths sum to {event_lengths.sum()}, "
-    #         f"but collected {hf_all.shape[0]} timesteps."
-    #     )
+    assert event_lengths.sum() == hf_all.shape[0], \
+        f'Mismatch between expected number of timesteps {event_lengths.sum()} and actual collected timesteps {hf_all.shape[0]}'
 
     event_ids = test_dataset.event_ids
     assert len(event_ids) == len(event_lengths)
@@ -116,26 +115,26 @@ def eval(area_name: str, identifier: str, val_group: int):
         rmse_per_t = np.sqrt(np.mean(squared_error, axis=1))
 
         t_range = np.arange(int(event_length))
-        plot_line(t_range, csi_per_t, title=f'Upsampled Water Depth CSI (Event {event_id})', xlabel='Timestep', ylabel='CSI', \
+        plot_line(t_range, csi_per_t, title=f'Water Depth CSI (Event {event_id})', xlabel='Timestep', ylabel='CSI', \
             ylim_bottom=0, ylim_top=1, output_path=f'model/{area_name}/{identifier}_Ev_{event_id}_csi_t.png')
-        plot_line(t_range, rmse_per_t, title=f'Upsampled Water Depth RMSE (Event {event_id})', xlabel='Timestep', ylabel='RMSE',
+        plot_line(t_range, rmse_per_t, title=f'Water Depth RMSE (Event {event_id})', xlabel='Timestep', ylabel='RMSE',
             ylim_bottom=0, output_path=f'model/{area_name}/{identifier}_Ev_{event_id}_rmse_t.png')
     
-        # 1. maximum flood extent (CSI)
+        # maximum flood extent (CSI)
         hf_extent_max = hf_bin.max(axis=0)
         pred_extent_max = pred_bin.max(axis=0)
         _, _, pred_csi = pod_rfa_1tstep(hf_extent_max, pred_extent_max)
 
-        # 2. peak water depth R2 and avg diff
+        # peak water depth R2 and avg diff
         hf_max_wd = np.max(hf_wd, axis=0)
         pred_max_wd = np.max(pred_wd, axis=0)
         max_wd_r2 = r2_score(hf_max_wd, pred_max_wd)
         avg_peak_diff = np.mean(hf_max_wd - pred_max_wd)
 
-        # 3. RMSE
+        # AvgRMSE (RMSE over time, averaged over nodes)
         pred_rmse = np.mean(np.sqrt(np.mean(squared_error, axis=0)))
 
-        # 4. fidelity index
+        # fidelity index
         pred_fi = fidelity_index(true=hf_wd, pred=pred_wd)
 
         event_metrics = {
@@ -157,8 +156,6 @@ def eval(area_name: str, identifier: str, val_group: int):
             f'Prediction RMSE: {pred_rmse:.6f}\n'
             f'Fidelity Index: {pred_fi:.6f}\n'
         )
-
-        break # TODO
 
     with open(METRICS_PATH, 'w') as f:
         json.dump(metrics, f, indent=4)
@@ -259,12 +256,12 @@ def read_stats(area_name: str, identifier: str, val_group: int):
 
 if __name__ == '__main__':
     print('---------- Evaluating ----------')
-    # visualise_loss_curves(area_name='Carlisle', identifier='2026-10-05', val_group=1)
-    # eval(area_name='Carlisle', identifier='2026-10-05', val_group=1)
+    visualise_loss_curves(area_name='Carlisle', identifier='2026-10-09', val_group=1)
+    eval(area_name='Carlisle', identifier='2026-10-09', val_group=1)
     # print('---------- Evaluating 2 ----------')
     # visualise_loss_curves(area_name='Carlisle', identifier='2026-10-05', val_group=1)
     # eval(area_name='Chowilla', identifier='2026-10-05', val_group=1)
-    eval(area_name='BurnettRV', identifier='2026-10-08', val_group=1)
+    # eval(area_name='BurnettRV', identifier='2026-10-08', val_group=1)
     # read_stats('2026-10-02', val_group=1)
     
     # key format: [index, model]

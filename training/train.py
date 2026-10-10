@@ -1,6 +1,7 @@
 import json
 import numpy as np
 import os
+import random
 import time
 import torch
 import torch.nn as nn
@@ -12,18 +13,31 @@ from torch.optim.lr_scheduler import ReduceLROnPlateau
 from torch_geometric.loader import DataLoader
 from data.make_dataset import make_dataset
 
-def train(area_name: str, mode: str, identifier: str, val_group: int, epochs_to_do: int):
+
+def set_seed(seed: int):
+    random.seed(seed)
+    np.random.seed(seed)
+    torch.manual_seed(seed)
+    torch.cuda.manual_seed(seed)
+    torch.cuda.manual_seed_all(seed)
+    torch.backends.cudnn.deterministic = True
+    torch.backends.cudnn.benchmark = False
+
+
+def train(area_name: str, mode: str, identifier: str, val_group: int, epochs_to_do: int, seed: int = 42):
     DEVICE = torch.device('cuda')
-    NUM_EPOCHS = epochs_to_do # num epochs to add, not do until this num of epochs
+    NUM_EPOCHS = epochs_to_do
     CHECKPOINT_DIR = f'model/{area_name}'
-    CONFIG_PATH = f'{CHECKPOINT_DIR}/{identifier}_config.json'
+    CONFIG_PATH = f'model/configs/{identifier}_config.json'
     LATEST_CHECKPOINT_PATH = f'{CHECKPOINT_DIR}/{identifier}_Val_{val_group}_latest.pt'
     BEST_CHECKPOINT_PATH = f'{CHECKPOINT_DIR}/{identifier}_Val_{val_group}_best.pt'
     LOSS_STATS_PATH = f'{CHECKPOINT_DIR}/{identifier}_Val_{val_group}_loss_stats.json'
 
     os.makedirs(CHECKPOINT_DIR, exist_ok=True)
+    set_seed(seed)
 
     if mode == 'new':
+        print(f'Training new model on {area_name} on validation group {val_group} using config {CONFIG_PATH}.')
 
         with open(CONFIG_PATH, 'r') as f:
             config = json.load(f)
@@ -33,6 +47,7 @@ def train(area_name: str, mode: str, identifier: str, val_group: int, epochs_to_
             weight_decay = config['weight_decay']
             sch_factor = config['sch_factor']
             sch_patience = config['sch_patience']
+            min_lr = config['min_lr']
             t_interval = config['t_interval']
 
         start_epoch = 1
@@ -42,9 +57,9 @@ def train(area_name: str, mode: str, identifier: str, val_group: int, epochs_to_
             'train_loss': [],
             'val_loss': []
         }
-        print(f'Training new model on {area_name} on validation group {val_group} using config {CONFIG_PATH}.')
 
     elif mode == 'continue':
+        print(f'Resuming training of model on {area_name} on validation group {val_group} using config {CONFIG_PATH}.')
 
         with open(CONFIG_PATH, 'r') as f:
             config = json.load(f)
@@ -54,6 +69,7 @@ def train(area_name: str, mode: str, identifier: str, val_group: int, epochs_to_
             weight_decay = config['weight_decay']
             sch_factor = config['sch_factor']
             sch_patience = config['sch_patience']
+            min_lr = config['min_lr']
             t_interval = config['t_interval']
 
         checkpoint = torch.load(LATEST_CHECKPOINT_PATH, map_location=DEVICE, weights_only=False)
@@ -65,8 +81,7 @@ def train(area_name: str, mode: str, identifier: str, val_group: int, epochs_to_
 
         with open(LOSS_STATS_PATH, 'r') as f:
             loss_stats = json.load(f)
-        print(f'Resuming training of model on {area_name} on validation group {val_group} using config {CONFIG_PATH}.')
-
+        
     else:
         assert False, f'Unknown training mode: {mode}, should be "new" or "continue"'
 
@@ -78,24 +93,28 @@ def train(area_name: str, mode: str, identifier: str, val_group: int, epochs_to_
     event_ends = np.cumsum(np.asarray(dataset.num_timesteps, dtype=np.int32))
     idx_train = filter_timesteps(ttsplit['idx_train'], event_ends, t_interval)
     idx_val = filter_timesteps(ttsplit['idx_test'], event_ends, t_interval)
-    print(f'----- DEBUG INFO train samples {idx_train.shape}, validation samples {idx_val.shape} -----')
+    print(f'----- Using timestep interval {t_interval}: Training samples: {idx_train.shape}, Validation samples: {idx_val.shape} -----')
 
     train_dataset = Subset(dataset, idx_train)
     val_dataset = Subset(dataset, idx_val)
+    g = torch.Generator()
+    g.manual_seed(seed)
     train_loader = DataLoader(
         train_dataset,
         batch_size=batch_size,
-        shuffle=False,
-        num_workers=min(batch_size, 4),
+        shuffle=True,
+        num_workers=4,
         persistent_workers=True,
-        pin_memory=True)
+        pin_memory=True,
+        generator=g)
     val_loader = DataLoader(
         val_dataset,
         batch_size=batch_size,
         shuffle=False,
-        num_workers=min(batch_size, 4),
+        num_workers=4,
         persistent_workers=True,
-        pin_memory=True)
+        pin_memory=True,
+        generator=g)
 
     # constants for this fold/validation group
     wet_idx = dataset.wet_idx.to(DEVICE)
@@ -108,7 +127,7 @@ def train(area_name: str, mode: str, identifier: str, val_group: int, epochs_to_
     num_hf_nodes = model.num_hf_nodes
 
     optimiser = AdamW(model.parameters(), lr=learning_rate, weight_decay=weight_decay)
-    scheduler = ReduceLROnPlateau(optimiser, mode='min', factor=sch_factor, patience=sch_patience)
+    scheduler = ReduceLROnPlateau(optimiser, mode='min', factor=sch_factor, patience=sch_patience, min_lr=min_lr)
     loss_func = nn.MSELoss()
 
     if mode == 'continue':
@@ -120,16 +139,18 @@ def train(area_name: str, mode: str, identifier: str, val_group: int, epochs_to_
     print('Starting training...')
     
     for epoch in range(start_epoch, start_epoch + NUM_EPOCHS):
+
         # training loop
         model.train()
         total_train_loss = 0.0
         for batch in train_loader:
             batch = batch.to(DEVICE)
             optimiser.zero_grad()
-            y_residual_pred = model(
-                lf_dyn = batch.lf_dyn,
-                batch_size = batch.num_graphs
-            )
+            with torch.autocast(device_type='cuda', dtype=torch.bfloat16):
+                y_residual_pred = model(
+                    lf_dyn = batch.lf_dyn,
+                    batch_size = batch.num_graphs
+                )
             y_pred = batch.upsampled_water_depth + y_residual_pred
             loss = masked_loss(
                 y_t = batch.hf_water_depth,
@@ -150,10 +171,11 @@ def train(area_name: str, mode: str, identifier: str, val_group: int, epochs_to_
         with torch.inference_mode():
             for batch in val_loader:
                 batch = batch.to(DEVICE)
-                y_residual_pred = model(
-                lf_dyn = batch.lf_dyn,
-                batch_size = batch.num_graphs
-            )
+                with torch.autocast(device_type='cuda', dtype=torch.bfloat16):
+                    y_residual_pred = model(
+                        lf_dyn = batch.lf_dyn,
+                        batch_size = batch.num_graphs
+                    )
                 y_pred = batch.upsampled_water_depth + y_residual_pred
                 val_loss = masked_loss(
                     y_t = batch.hf_water_depth,
@@ -225,9 +247,11 @@ def filter_timesteps(indices, event_ends, t_interval):
 
 
 if __name__ == '__main__':
-    # print('----- Carlisle, t=2, 6-layer GNNs -----')
-    # train(area_name='Carlisle', mode='new', identifier='2026-10-06', val_group=1, epochs_to_do=1) # 1hr10min per 5 epochs?
-    # print('----- Chowilla, t=2, 6-layer GNNs -----')
-    # train(area_name='Chowilla', mode='new', identifier='2026-10-05', val_group=1, epochs_to_do=50)
-    print('----- BurnettRV, t=4, 6-layer GNNs -----')
-    train(area_name='BurnettRV', mode='new', identifier='2026-10-08', val_group=1, epochs_to_do=50)
+    # print('----- Carlisle, t=2, 6-layer GNNs new model -----')
+    # train(area_name='Carlisle', mode='continue', identifier='2026-10-09', val_group=1, epochs_to_do=49) # 1hr10min per 5 epochs?
+    print('----- Chowilla, t=2, 6-layer GNNs new model -----')
+    train(area_name='Chowilla', mode='new', identifier='2026-10-09', val_group=1, epochs_to_do=100, seed=42)
+    # print('----- BurnettRV, t=4, 3-layer GNNs -----')
+    # train(area_name='BurnettRV', mode='new', identifier='2026-10-08', val_group=1, epochs_to_do=50) # if 6 layers, 50min per epoch
+    # 6 layers: 
+    # t=4: 6 layers: 50min, 3 layers: 30min

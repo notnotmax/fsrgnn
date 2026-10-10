@@ -1,120 +1,97 @@
-# Adapted from https://github.com/acostacos/dual_flood_gnn
-
 import numpy as np
 import torch
 from torch import Tensor
 from torch.nn import Module
 from torch_cluster import knn
-from torch_geometric.nn import MessagePassing, Sequential as PygSequential
-from typing import Tuple
-from model.model_utils import make_mlp
+from model.model_utils import make_mlp, make_gnn
 
 class FSRGNN(Module):
 
     def __init__(self,
-        lf_static_node_features: int,
-        lf_dynamic_node_features: int,
-        lf_static_edge_features: int,
-        hf_static_node_features: int,
-        hf_static_edge_features: int,
+        lf_node_features: int,
+        lf_edge_features: int,
+        hf_node_features: int,
+        hf_edge_features: int,
         hidden_features: int,
         output_features: int,
-
-        # number of layers
-        encoder_layers: int,
-        lfgnn_layers: int,
-        lfgnn_mlp_layers: int,
-        hfgnn_layers: int,
-        hfgnn_mlp_layers: int,
-        decoder_layers: int,
-
-        # activations
-        encoder_activation: str = 'relu',
-        lfgnn_activation: str = 'relu',
-        hfgnn_activation: str = 'relu',
-        decoder_activation: str = 'relu',
-        
-        # misc
-        upsampler_k: int = 4,
-        mlp_norm: str = None,
-        residual: bool = False,
-        bias: bool = False):
+        mlp_layers: int = 2,
+        lfgnn_layers: int = 6,
+        hfgnn_layers: int = 6,
+        mlp_activation: str = 'relu',
+        layer_norm: bool = True,
+        residual: bool = True,
+        upsampler_k: int = 4):
 
         super().__init__()
 
-        lf_node_features = lf_static_node_features + lf_dynamic_node_features
-        encoder_decoder_hidden = hidden_features * 2
+        self.lf_node_encoder = make_mlp(
+            input_size = lf_node_features,
+            output_size = hidden_features,
+            hidden_size = hidden_features,
+            num_layers = mlp_layers,
+            activation = mlp_activation,
+            layer_norm = layer_norm
+        )
 
-        self.node_encoder = make_mlp(
-            input_size=lf_node_features,
-            output_size=hidden_features,
-            hidden_size=encoder_decoder_hidden,
-            num_layers=encoder_layers,
-            activation=encoder_activation,
-            norm=mlp_norm,
-            bias=bias)
-
-        self.edge_encoder = make_mlp(
-            input_size=lf_static_edge_features,
-            output_size=hidden_features,
-            hidden_size=encoder_decoder_hidden,
-            num_layers=encoder_layers,
-            activation=encoder_activation,
-            norm=mlp_norm,
-            bias=bias)
+        self.lf_edge_encoder = make_mlp(
+            input_size = lf_edge_features,
+            output_size = hidden_features,
+            hidden_size = hidden_features,
+            num_layers = mlp_layers,
+            activation = mlp_activation,
+            layer_norm = layer_norm
+        )
 
         self.hf_node_encoder = make_mlp(
-            input_size=hf_static_node_features,
-            output_size=hidden_features,
-            hidden_size=encoder_decoder_hidden,
-            num_layers=encoder_layers,
-            activation=encoder_activation,
-            norm=mlp_norm,
-            bias=bias)
+            input_size = hf_node_features,
+            output_size = hidden_features,
+            hidden_size = hidden_features,
+            num_layers = mlp_layers,
+            activation = mlp_activation,
+            layer_norm = layer_norm
+        )
 
         self.hf_edge_encoder = make_mlp(
-            input_size=hf_static_edge_features,
-            output_size=hidden_features,
-            hidden_size=encoder_decoder_hidden,
-            num_layers=encoder_layers,
-            activation=encoder_activation,
-            norm=mlp_norm,
-            bias=bias)
+            input_size = hf_edge_features,
+            output_size = hidden_features,
+            hidden_size = hidden_features,
+            num_layers = mlp_layers,
+            activation = mlp_activation,
+            layer_norm = layer_norm
+        )
 
-        self.lfgnn = self._make_gnn(
+        self.lfgnn = make_gnn(
             input_node_size=hidden_features,
             input_edge_size=hidden_features,
             output_node_size=hidden_features,
             output_edge_size=hidden_features,
             hidden_features=hidden_features,
             num_gnn_layers=lfgnn_layers,
-            mlp_layers=lfgnn_mlp_layers,
-            mlp_norm=mlp_norm,
-            activation=lfgnn_activation,
-            residual=residual,
-            bias=bias)
+            mlp_layers=mlp_layers,
+            mlp_activation=mlp_activation,
+            layer_norm=layer_norm,
+            residual=residual)
 
-        self.hfgnn = self._make_gnn(
+        self.hfgnn = make_gnn(
             input_node_size=hidden_features * 2, # using concatenated lf and hf
             input_edge_size=hidden_features,
             output_node_size=hidden_features,
             output_edge_size=hidden_features,
             hidden_features=hidden_features,
             num_gnn_layers=hfgnn_layers,
-            mlp_layers=hfgnn_mlp_layers,
-            mlp_norm=mlp_norm,
-            activation=hfgnn_activation,
-            residual=residual,
-            bias=bias)
-        
+            mlp_layers=mlp_layers,
+            mlp_activation=mlp_activation,
+            layer_norm=layer_norm,
+            residual=residual)
+
         self.node_decoder = make_mlp(
-            input_size=hidden_features,
-            output_size=output_features,
-            hidden_size=encoder_decoder_hidden,
-            num_layers=decoder_layers,
-            activation=decoder_activation,
-            norm=mlp_norm,
-            bias=bias)
+            input_size = hidden_features,
+            output_size = output_features,
+            hidden_size = hidden_features,
+            num_layers = mlp_layers,
+            activation = mlp_activation,
+            layer_norm = False
+        )
 
         self.upsampler_k = upsampler_k
         self.num_lf_nodes = None
@@ -133,6 +110,7 @@ class FSRGNN(Module):
 
         self.register_buffer('upsampler_neighbour_indices', None, persistent=False)
         self.register_buffer('upsampler_weights', None, persistent=False)
+
 
     def init_static_features(self, static_features_path: str):
         if self.lf_coords is not None:
@@ -157,11 +135,13 @@ class FSRGNN(Module):
 
         self._init_upsampler(self.lf_coords, self.hf_coords)
 
+
     def _standardise(self, x: Tensor, eps: float=1e-8):
         mean = x.mean(dim=0, keepdim=True)
         std = x.std(dim=0, keepdim=True)
         return (x - mean) / (std + eps)
     
+
     def _init_upsampler(self, lf_coords, hf_coords, eps: float=1e-8):
         if self.upsampler_neighbour_indices is not None or self.upsampler_weights is not None:
             assert False, 'Attempted to initialise upsampler weights twice.'
@@ -176,6 +156,7 @@ class FSRGNN(Module):
         self.upsampler_neighbour_indices = lf_indices
         self.upsampler_weights = w
 
+
     def _batched_edges(self, name: str, num_nodes: int, batch_size: int):
         key = (name, batch_size)
         if key not in self._edge_cache:
@@ -184,10 +165,11 @@ class FSRGNN(Module):
             self._edge_cache[key] = (edge_index.unsqueeze(0) + off).permute(1, 0, 2).reshape(2, -1)
         return self._edge_cache[key]
 
+
     def forward(self, lf_dyn: Tensor, batch_size: int) -> Tensor:
         lf_x = torch.cat([self.lf_static_x.repeat(batch_size, 1), lf_dyn], dim=-1)
-        x_lf = self.node_encoder(lf_x)
-        e_lf = self.edge_encoder(self.lf_edge_attr).repeat(batch_size, 1)
+        x_lf = self.lf_node_encoder(lf_x)
+        e_lf = self.lf_edge_encoder(self.lf_edge_attr).repeat(batch_size, 1)
         x_lf, _ = self.lfgnn(
             x_lf,
             self._batched_edges('lf_edge_index', self.num_lf_nodes, batch_size),
@@ -204,24 +186,6 @@ class FSRGNN(Module):
         y_pred = self.node_decoder(x_hf)
         return y_pred
 
-    # def forward_old(self, lf_x: Tensor, lf_edge_index: Tensor, lf_edge_attr: Tensor,
-    #     hf_x: Tensor, hf_edge_index: Tensor, hf_edge_attr: Tensor, num_graphs: int) -> Tensor:
-    #     x_lf = self.node_encoder(lf_x)
-    #     e_lf = self.edge_encoder(lf_edge_attr)
-
-    #     x_lf, _ = self.lfgnn(x_lf, lf_edge_index, e_lf) # ignore edge features because they are not used in upscaling
-
-    #     x_lf_upsampled = self.upsample(x_lf, num_graphs)
-
-    #     x_hf = self.hf_node_encoder(hf_x)
-
-    #     x_hf_combined = torch.cat([x_lf_upsampled, x_hf], dim=-1)
-
-    #     e_hf = self.hf_edge_encoder(hf_edge_attr)
-    #     x_hf, _ = self.hfgnn(x_hf_combined, hf_edge_index, e_hf)
-
-    #     y_pred = self.node_decoder(x_hf)
-    #     return y_pred
 
     def upsample(self, x_lf: Tensor, num_graphs: int):
         device = x_lf.device
@@ -234,148 +198,3 @@ class FSRGNN(Module):
         gathered = x_lf[idx] # [B * N_hf, k, h]
         x_hf_upsampled = torch.sum(gathered * w.unsqueeze(-1), dim=1) # [B * N_hf, h]
         return x_hf_upsampled
-        
-    def _make_gnn(self,
-        input_node_size: int,
-        input_edge_size: int,
-        output_node_size: int,
-        output_edge_size: int,
-        hidden_features: int,
-        num_gnn_layers: int,
-        mlp_layers: int,
-        activation: str,
-        mlp_norm: str,
-        residual: bool,
-        bias: bool):
-
-        layers = []
-
-        if num_gnn_layers == 1:
-            first_layer_residual = residual and (input_node_size == output_node_size) and (input_edge_size == output_edge_size)
-            layers.append((
-                NodeEdgeConv(
-                    node_in_channels=input_node_size,
-                    edge_in_channels=input_edge_size,
-                    node_out_channels=output_node_size,
-                    edge_out_channels=output_edge_size,
-                    hidden_size=hidden_features,
-                    num_layers=mlp_layers,
-                    activation=activation,
-                    mlp_norm=mlp_norm,
-                    residual=first_layer_residual,
-                    bias=bias),
-                    'x, edge_index, edge_attr -> x, edge_attr'
-            ))
-
-        else: # multilayer GNN
-            layers = []
-            first_layer_residual = residual and (input_node_size == hidden_features) and (input_edge_size == hidden_features)
-            layers.append(( # first layer
-                NodeEdgeConv(
-                    node_in_channels=input_node_size,
-                    edge_in_channels=input_edge_size,
-                    node_out_channels=hidden_features,
-                    edge_out_channels=hidden_features,
-                    hidden_size=hidden_features,
-                    num_layers=mlp_layers,
-                    activation=activation,
-                    mlp_norm=mlp_norm,
-                    residual=first_layer_residual,
-                    bias=bias),
-                    'x, edge_index, edge_attr -> x, edge_attr'
-            ))
-            for _ in range(num_gnn_layers - 2):
-                layers.append(( # middle layers
-                    NodeEdgeConv(
-                        node_in_channels=hidden_features,
-                        edge_in_channels=hidden_features,
-                        node_out_channels=hidden_features,
-                        edge_out_channels=hidden_features,
-                        hidden_size=hidden_features,
-                        num_layers=mlp_layers,
-                        activation=activation,
-                        mlp_norm=mlp_norm,
-                        residual=residual,
-                        bias=bias),
-                    'x, edge_index, edge_attr -> x, edge_attr'
-                ))
-            layers.append(( # last layer
-                NodeEdgeConv(
-                    node_in_channels=hidden_features,
-                    edge_in_channels=hidden_features,
-                    node_out_channels=output_node_size,
-                    edge_out_channels=output_edge_size,
-                    hidden_size=hidden_features,
-                    num_layers=mlp_layers,
-                    activation=activation,
-                    mlp_norm=mlp_norm,
-                    residual=residual,
-                    bias=bias),
-                'x, edge_index, edge_attr -> x, edge_attr'
-            ))
-
-        return PygSequential('x, edge_index, edge_attr', layers)
-
-class NodeEdgeConv(MessagePassing):
-    """
-    Message = m_ij = MLP(x_i, e_ij, x_j)
-    Aggregate = a_i = sum_j(m_ij)
-    Node Update = MLP(a_i)
-    Edge Update = Message
-    """
-    def __init__(self,
-        node_in_channels: int,
-        edge_in_channels: int,
-        node_out_channels: int,
-        edge_out_channels: int,
-        hidden_size: int,
-        num_layers: int = 2,
-        activation: str = 'relu',
-        mlp_norm: str = None,
-        residual: bool = False,
-        bias: bool = False):
-
-        super().__init__(aggr='sum')
-
-        self.residual = residual
-        
-        self.msg_mlp = make_mlp(
-            input_size=node_in_channels * 2 + edge_in_channels,
-            output_size=edge_out_channels,
-            hidden_size=hidden_size,
-            num_layers=num_layers,
-            activation=activation,
-            norm=mlp_norm,
-            bias=bias)
-        
-        self.node_mlp = make_mlp(
-            input_size=edge_out_channels,
-            output_size=node_out_channels,
-            hidden_size=hidden_size,
-            num_layers=num_layers,
-            activation=activation,
-            norm=mlp_norm,
-            bias=bias)
-
-    def forward(self, x: Tensor, edge_index: Tensor, edge_attr: Tensor) -> Tensor:
-        row, col = edge_index
-        x_i, x_j = x[col], x[row]
-
-        # message logic here
-        cat_feats = torch.cat([x_i, edge_attr, x_j], dim=-1)
-        edge_update = self.msg_mlp(cat_feats)
-
-        if self.residual:
-            edge_update = edge_update + edge_attr
-
-        node_update = self.propagate(edge_index, msg=edge_update, x=x)
-        return node_update, edge_update
-
-    def message(self, msg: Tensor) -> Tensor:
-        return msg
-
-    def update(self, aggr: Tensor, x: Tensor) -> Tensor:
-        out = self.node_mlp(aggr)
-        if self.residual:
-            out = out + x
-        return out

@@ -1,5 +1,3 @@
-# Adapted from https://github.com/acostacos/dual_flood_gnn
-
 import numpy as np
 import os
 import torch
@@ -42,9 +40,7 @@ class FloodEventDataset(Dataset):
         feature_stats_path: str,
         event_ids: list,
         group_ids: list,
-        num_timesteps: list, # number of timesteps per HF run
-        previous_timesteps: int = 0 # number of timesteps to look back
-        ):
+        num_timesteps: list):
 
         # filepaths
         self.root = root_dir
@@ -76,9 +72,6 @@ class FloodEventDataset(Dataset):
 
         self.dynamic_data_per_event = {} # caching
 
-        # other settings, unused for now
-        self.previous_timesteps = previous_timesteps # TODO timesteps to look back
-
         super().__init__(self.root, transform = None, pre_transform = None, pre_filter = None)
 
         # post-process call one-time loading of static features to reduce loading from disk
@@ -96,10 +89,12 @@ class FloodEventDataset(Dataset):
         self.lf_dyn_mean = feature_stats['lf_water_depth_mean']
         self.lf_dyn_std = feature_stats['lf_water_depth_std']
 
+
     @property
     def raw_file_names(self):
         # pass filepaths into the constructor
         return []
+
 
     @property
     def processed_file_names(self):
@@ -107,9 +102,11 @@ class FloodEventDataset(Dataset):
             self.STATIC_FEATURES_FILE, # TODO add dynamic paths
         ]
 
+
     def download(self):
         # no downloading
         pass
+
 
     def process(self):
 
@@ -136,7 +133,7 @@ class FloodEventDataset(Dataset):
 
         # ----- create dynamic files -----
         for i, event_id in enumerate(self.event_ids):
-            print(f'Getting dynamic values for event {event_id}, index {i}.')
+            print(f'Getting dynamic values for event {i} / {len(self.event_ids)}, event ID: {event_id}')
             lf_dynamic_node_features = self._get_lf_dynamic_node_features(event_idx=i)
             hf_water_depth, upsampled_water_depth = self._get_hf_dynamic_data(event_idx=i)
 
@@ -147,8 +144,10 @@ class FloodEventDataset(Dataset):
             print(f'Saved dynamic values for event {event_id}.')
             del lf_dynamic_node_features, hf_water_depth, upsampled_water_depth
 
+
     def len(self):
         return sum(self.num_timesteps)
+
 
     def _get_dynamic_data(self, event_idx: int):
         if event_idx not in self.dynamic_data_per_event:
@@ -164,6 +163,7 @@ class FloodEventDataset(Dataset):
                 ),
             }
         return self.dynamic_data_per_event[event_idx]
+
 
     def get(self, idx):
 
@@ -208,24 +208,20 @@ class FloodEventDataset(Dataset):
         
         return data
 
-    # ---------- other methods ---------
 
     def _get_num_timesteps(self, event_idx):
         return self.num_timesteps[event_idx]
 
+    # ---------- Low-fidelity ----------
+
     def _get_lf_geometry(self):
         return np.load(self.lf_geometry_path)
 
-    def _get_lf_coords(self):
-        lf_geom = self._get_lf_geometry()
-        return lf_geom['cell_coordinates']
-
-    def _get_lf_edge_index(self):
-        lf_geom = self._get_lf_geometry()
-        return lf_geom['edge_index']
 
     def _get_lf_static_node_features(self):
-        # want area, elevation, roughness
+        """
+        LF static node features: cell area, elevation, roughness (Manning's)
+        """
         lf_geom = self._get_lf_geometry()
         lf_area = lf_geom['cell_area']
         lf_elevation = lf_geom['cell_elevation']
@@ -234,16 +230,11 @@ class FloodEventDataset(Dataset):
         static_node_features = np.array([lf_area, lf_elevation, lf_roughness]).transpose()
         return static_node_features
 
-    def _get_hf_static_node_features(self):
-        # we are only provided area and elevation
-        hf_geom = self._get_hf_geometry()
-        hf_area = hf_geom['cell_area']
-        hf_elevation = hf_geom['cell_elevation']
-
-        static_node_features = np.array([hf_area, hf_elevation]).transpose()
-        return static_node_features
 
     def _get_lf_static_edge_features(self):
+        """
+        LF edge features: edge length
+        """
         lf_geom = self._get_lf_geometry()
         lf_coords = lf_geom['cell_coordinates']
         lf_edge_index = lf_geom['edge_index']
@@ -253,17 +244,11 @@ class FloodEventDataset(Dataset):
         static_edge_features = np.array([lf_edge_lengths]).transpose()
         return static_edge_features
 
-    def _get_hf_static_edge_features(self):
-        hf_geom = self._get_hf_geometry()
-        hf_coords = hf_geom['cell_coordinates']
-        hf_edge_index = hf_geom['edge_index']
-        n1_coords, n2_coords = hf_coords[hf_edge_index[0]], hf_coords[hf_edge_index[1]]
-        hf_edge_lengths = np.linalg.norm(n1_coords - n2_coords, axis = 1)
-
-        static_edge_features = np.array([hf_edge_lengths]).transpose()
-        return static_edge_features
 
     def _get_lf_dynamic_node_features(self, event_idx: int):
+        """
+        LF dynamic node features: water depth (wse - elevation, clamped to be nonnegative)
+        """
         # BurnettRV uses a different key in the hecras file
         area_name = 'BurnettRV_region' if self.area_name == 'BurnettRV' else self.area_name
         lf_path = self.lf_hecras_paths[event_idx]
@@ -290,23 +275,42 @@ class FloodEventDataset(Dataset):
 
         return lf_water_depth
 
+    # ---------- High-fidelity ----------
+
     def _get_hf_geometry(self):
         return np.load(self.hf_geometry_path)
 
-    def _get_hf_coords(self):
-        hf_geom = self._get_hf_geometry()
-        return hf_geom['cell_coordinates']
 
-    def _get_hf_elevation(self):
+    def _get_hf_static_node_features(self):
+        """
+        HF static node features: cell area, elevation
+        """
         hf_geom = self._get_hf_geometry()
-        return hf_geom['cell_elevation']
+        hf_area = hf_geom['cell_area']
+        hf_elevation = hf_geom['cell_elevation']
 
-    def _get_hf_edge_index(self):
+        static_node_features = np.array([hf_area, hf_elevation]).transpose()
+        return static_node_features
+
+
+    def _get_hf_static_edge_features(self):
+        """
+        HF static edge features: edge length
+        """
         hf_geom = self._get_hf_geometry()
-        return hf_geom['edge_index']
+        hf_coords = hf_geom['cell_coordinates']
+        hf_edge_index = hf_geom['edge_index']
+        n1_coords, n2_coords = hf_coords[hf_edge_index[0]], hf_coords[hf_edge_index[1]]
+        hf_edge_lengths = np.linalg.norm(n1_coords - n2_coords, axis = 1)
+
+        static_edge_features = np.array([hf_edge_lengths]).transpose()
+        return static_edge_features
+
 
     def _get_hf_water_depth_npz(self, event_idx: int):
-        # expects npz to be preprocessed to remove ghost cells
+        """
+        
+        """
         hf_path = self.hf_paths[event_idx]
         hf_data = np.load(hf_path)
 
@@ -316,12 +320,13 @@ class FloodEventDataset(Dataset):
         if self.area_name == 'Carlisle':
             hf_water_level = hf_data['wse_data']
         elif self.area_name == 'BurnettRV':
-            hf_water_level = np.nan_to_num(hf_data['wl_data'][48:,:], nan=-999)
+            hf_water_level = np.nan_to_num(hf_data['wl_data'][48:,:], nan=-999) # Tuflow can have nans
             hf_water_level = filter_dry_areas(hf_water_level, hf_elevation)
 
         assert hf_water_level.shape[0] == self._get_num_timesteps(event_idx), 'HF water depth timestep mismatch with input timesteps.'
         hf_water_depth = np.maximum(0.0, hf_water_level - hf_elevation)
         return hf_water_depth
+
 
     def _get_hf_water_depth_hecras(self, event_idx: int):
         hf_path = self.hf_paths[event_idx]
@@ -335,7 +340,14 @@ class FloodEventDataset(Dataset):
         hf_water_depth = np.delete(hf_water_depth, ghost_idx, axis=1)
         return hf_water_depth
 
+
     def _get_hf_dynamic_data(self, event_idx: int):
+        """
+        Extracts HF water depth (target) and LF-to-HF upsampled water depth (used to calculate residual).
+
+        Upsampling is done by finding the WSE of the nearest LF neighbour for each HF cell and
+        subtracting the HF cell elevation, then clamping to be nonnegative.
+        """
         # get lf water surface and upscale
         area_name = 'BurnettRV_region' if self.area_name == 'BurnettRV' else self.area_name
         lf_path = self.lf_hecras_paths[event_idx]
@@ -358,7 +370,7 @@ class FloodEventDataset(Dataset):
         elif self.area_name == 'BurnettRV':
             lf_water_level = lf_water_level[:hf_timesteps, :]
         else:
-            raise NotImplementedError
+            raise NotImplementedError(f'Timestep matching not implemented for area {self.area_name}.')
 
         if self.hf_filetype == 'npz':
             hf_water_depth = self._get_hf_water_depth_npz(event_idx)
@@ -368,20 +380,15 @@ class FloodEventDataset(Dataset):
             assert False, f'Unsupported HF filetype {self.hf_filetype}.'
 
         # ---------- upscale LF to HF ----------
-
-        # load geometries (cell coordinates)
-        # assume that ghost cells have been removed as part of preprocessing
         lf_geom = self._get_lf_geometry()
         lf_coords = lf_geom['cell_coordinates']
         hf_geom = self._get_hf_geometry()
         hf_coords = hf_geom['cell_coordinates']
         hf_elevation = hf_geom['cell_elevation']
 
-        # upsampling
         lf_kdtree = KDTree(lf_coords)
         dists, nearest_lf_indices = lf_kdtree.query(hf_coords)
         lf_water_level_upscaled = lf_water_level[:, nearest_lf_indices]
 
         upsampled_water_depth = np.maximum(0.0, lf_water_level_upscaled - hf_elevation)
-
         return hf_water_depth, upsampled_water_depth
