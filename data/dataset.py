@@ -1,22 +1,12 @@
 import numpy as np
 import os
 import torch
-import torch.nn.functional as F
 
-from data.hecras_data_retrieval import get_event_timesteps, get_min_cell_elevation, get_water_level
+from data.get_feature_stats import get_feature_stats
+from data.hecras_data_retrieval import get_min_cell_elevation
+from data.HECRAS_functions import filter_dry_areas, get_2d_hecras_results
 from scipy.spatial import KDTree
 from torch_geometric.data import Data, Dataset
-from utils.utils import filter_dry_areas
-
-
-class MultiResolutionData(Data):
-    def __inc__(self, key, value, *args, **kwargs):
-        if key == 'lf_edge_index':
-            return int(self.lf_num_nodes)
-        elif key == 'hf_edge_index':
-            return int(self.hf_num_nodes)
-        else:
-            return super().__inc__(key, value, *args, **kwargs)
 
 
 class FloodEventDataset(Dataset):
@@ -29,18 +19,19 @@ class FloodEventDataset(Dataset):
 
     def __init__(
         self,
+        mode: str,
         root_dir: str,
         area_name: str,
         lf_geometry_path: str,
         hf_geometry_path: str,
         lf_hecras_paths: list[str],
         hf_paths: list[str],
-        hf_filetype: str, # file extension, either npz or hdf
         cat_data_path: str,
         feature_stats_path: str,
         event_ids: list,
         group_ids: list,
         num_timesteps: list):
+        self.mode = mode
 
         # filepaths
         self.root = root_dir
@@ -49,7 +40,6 @@ class FloodEventDataset(Dataset):
         self.hf_geometry_path = hf_geometry_path
         self.lf_hecras_paths = lf_hecras_paths
         self.hf_paths = hf_paths
-        self.hf_filetype = hf_filetype
 
         # event data
         self.event_ids = event_ids
@@ -73,6 +63,9 @@ class FloodEventDataset(Dataset):
         self.dynamic_data_per_event = {} # caching
 
         super().__init__(self.root, transform = None, pre_transform = None, pre_filter = None)
+
+        if self.mode == 'all':
+            return
 
         # post-process call one-time loading of static features to reduce loading from disk
         static_features = np.load(self.STATIC_FEATURES_PATH)
@@ -98,17 +91,21 @@ class FloodEventDataset(Dataset):
 
     @property
     def processed_file_names(self):
-        return [
-            self.STATIC_FEATURES_FILE, # TODO add dynamic paths
-        ]
+        return [self.STATIC_FEATURES_FILE] # TODO
 
 
     def download(self):
         # no downloading
         pass
 
-
+    
     def process(self):
+        # run process_all below
+        pass
+
+
+    def process_all(self):
+        assert self.mode == 'all', 'Not preprocessing all npy files at once. Ensure this is intentional.'
 
         # ----- create static file -----
         lf_geom = self._get_lf_geometry()
@@ -137,12 +134,21 @@ class FloodEventDataset(Dataset):
             lf_dynamic_node_features = self._get_lf_dynamic_node_features(event_idx=i)
             hf_water_depth, upsampled_water_depth = self._get_hf_dynamic_data(event_idx=i)
 
-            np.save(f'{self.processed_dir}/lf_dynamic_node_features_event_{event_id}.npy', lf_dynamic_node_features)
-            np.save(f'{self.processed_dir}/upsampled_water_depth_event_{event_id}.npy', upsampled_water_depth)
-            np.save(f'{self.processed_dir}/hf_water_depth_event_{event_id}.npy', hf_water_depth)
+            assert lf_dynamic_node_features.shape[0] == self.num_timesteps[i], f'LF/HF timestep mismatch for event {event_id}'
+            assert upsampled_water_depth.shape == hf_water_depth.shape
+
+            np.save(f'{self.processed_dir}/lf_dynamic_node_features_event_{event_id}.npy', lf_dynamic_node_features.astype(np.float32))
+            np.save(f'{self.processed_dir}/upsampled_water_depth_event_{event_id}.npy', upsampled_water_depth.astype(np.float32))
+            np.save(f'{self.processed_dir}/hf_water_depth_event_{event_id}.npy', hf_water_depth.astype(np.float32))
 
             print(f'Saved dynamic values for event {event_id}.')
             del lf_dynamic_node_features, hf_water_depth, upsampled_water_depth
+
+        VAL_GROUPS = {'Carlisle': 9, 'Chowilla': 10, 'BurnettRV': 4}
+        assert self.area_name in VAL_GROUPS, f'Loading of dynamic feature statistics for {self.area_name} not set.'
+
+        for val in range(1, VAL_GROUPS[self.area_name] + 1):
+            get_feature_stats(self.area_name, val)
 
 
     def len(self):
@@ -195,7 +201,7 @@ class FloodEventDataset(Dataset):
         
         lf_dynamic_node_features = (lf_dynamic_node_features - self.lf_dyn_mean) / self.lf_dyn_std
 
-        data = MultiResolutionData(
+        data = Data(
             lf_dyn = lf_dynamic_node_features,
             hf_water_depth = hf_water_depth, 
             upsampled_water_depth = upsampled_water_depth, # to use in reconstruction after predicting the residual
@@ -247,33 +253,84 @@ class FloodEventDataset(Dataset):
 
     def _get_lf_dynamic_node_features(self, event_idx: int):
         """
-        LF dynamic node features: water depth (wse - elevation, clamped to be nonnegative)
+        LF dynamic node features: water depth
         """
-        # BurnettRV uses a different key in the hecras file
-        area_name = 'BurnettRV_region' if self.area_name == 'BurnettRV' else self.area_name
-        lf_path = self.lf_hecras_paths[event_idx]
-
-        # get ghost cell indices to filter out, assumed to be consistent across runs
-        lf_elevation = get_min_cell_elevation(lf_path, area_name)
-        ghost_idx = np.where(np.isnan(lf_elevation))[0]
-        
-        lf_timesteps = len(get_event_timesteps(lf_path))
-        hf_timesteps = self.num_timesteps[event_idx]
-
-        lf_water_level = get_water_level(lf_path, area_name)
-        lf_water_depth = np.maximum(0.0, lf_water_level - lf_elevation)
-        lf_water_depth = np.delete(lf_water_depth, ghost_idx, axis=1)
-
         if self.area_name == 'Carlisle':
-            lf_water_depth = lf_water_depth[8:, :]
+            _, lf_water_depth = self._get_lf_wse_depth_carlisle(event_idx)
         elif self.area_name == 'Chowilla':
-            pass
+            _, lf_water_depth = self._get_lf_wse_depth_chowilla(event_idx)
         elif self.area_name == 'BurnettRV':
-            lf_water_depth = lf_water_depth[:hf_timesteps, :]
+            _, lf_water_depth = self._get_lf_wse_depth_burnett(event_idx)
         else:
-            raise NotImplementedError
+            raise NotImplementedError(f'Raw data extraction for {self.area_name} not implemented.')
 
         return lf_water_depth
+
+
+    def _get_lf_wse_depth_carlisle(self, event_idx: int):
+        """
+        Get LF water level and depth from raw HECRAS file with ghost cells filtered out.
+        For Carlisle, use warmup period of 1.9 hours.
+        (With each timestep being 15min apart, trims 8 timesteps.)
+        """
+        assert self.area_name == 'Carlisle', 'Mismatch between area name and function.'
+        
+        lf_path = self.lf_hecras_paths[event_idx]
+        lf_elevation = get_min_cell_elevation(lf_path, 'Carlisle')
+        ghost_idx = np.where(np.isnan(lf_elevation))[0]
+        lf_elevation = np.delete(lf_elevation, ghost_idx)
+
+        # get LF wse from hecras file
+        lf_water_level = get_2d_hecras_results(lf_path, 'Carlisle', warmupperiod="1.9 hours", remove_ghost_cells=True)[0]
+        lf_water_level = filter_dry_areas(lf_water_level, lf_elevation)
+        lf_water_depth = np.maximum(0.0, lf_water_level - lf_elevation)
+
+        return lf_water_level, lf_water_depth
+
+    
+    def _get_lf_wse_depth_chowilla(self, event_idx: int):
+        """
+        Get LF water level and depth from raw HECRAS file with ghost cells filtered out.
+        For Chowilla, use the default warmup period of 10 hours.
+        """
+        assert self.area_name == 'Chowilla', 'Mismatch between area name and function.'
+
+        lf_path = self.lf_hecras_paths[event_idx]
+        lf_elevation = get_min_cell_elevation(lf_path, 'Chowilla')
+        ghost_idx = np.where(np.isnan(lf_elevation))[0]
+        lf_elevation = np.delete(lf_elevation, ghost_idx)
+
+        # get LF wse from hecras file
+        lf_water_level = get_2d_hecras_results(lf_path, 'Chowilla', remove_ghost_cells=True)[0]
+        lf_water_level = filter_dry_areas(lf_water_level, lf_elevation)
+        lf_water_depth = np.maximum(0.0, lf_water_level - lf_elevation)
+
+        return lf_water_level, lf_water_depth
+
+
+    def _get_lf_wse_depth_burnett(self, event_idx: int):
+        """
+        Get LF water level and depth from raw HECRAS file with ghost cells filtered out.
+        For Burnett, use warmup period of 47.5 hours and trim to match HF timesteps.
+        """
+        assert self.area_name == 'BurnettRV', 'Mismatch between area name and function.'
+
+        lf_path = self.lf_hecras_paths[event_idx]
+        lf_elevation = get_min_cell_elevation(lf_path, 'BurnettRV_region')
+        ghost_idx = np.where(np.isnan(lf_elevation))[0]
+        lf_elevation = np.delete(lf_elevation, ghost_idx)
+
+        # get LF wse from hecras file
+        lf_water_level = get_2d_hecras_results(lf_path, 'BurnettRV_region', warmupperiod="47.5 hours", remove_ghost_cells=True)[0]
+        lf_water_level = filter_dry_areas(lf_water_level, lf_elevation)
+        lf_water_depth = np.maximum(0.0, lf_water_level - lf_elevation)
+
+        # trim to match HF timesteps (Burnett only)
+        hf_timesteps = self.num_timesteps[event_idx]
+        lf_water_depth = lf_water_depth[:hf_timesteps, :]
+        lf_water_level = lf_water_level[:hf_timesteps, :]
+
+        return lf_water_level, lf_water_depth
 
     # ---------- High-fidelity ----------
 
@@ -307,40 +364,6 @@ class FloodEventDataset(Dataset):
         return static_edge_features
 
 
-    def _get_hf_water_depth_npz(self, event_idx: int):
-        """
-        
-        """
-        hf_path = self.hf_paths[event_idx]
-        hf_data = np.load(hf_path)
-
-        hf_geom = self._get_hf_geometry()
-        hf_elevation = hf_geom['cell_elevation']
-
-        if self.area_name == 'Carlisle':
-            hf_water_level = hf_data['wse_data']
-        elif self.area_name == 'BurnettRV':
-            hf_water_level = np.nan_to_num(hf_data['wl_data'][48:,:], nan=-999) # Tuflow can have nans
-            hf_water_level = filter_dry_areas(hf_water_level, hf_elevation)
-
-        assert hf_water_level.shape[0] == self._get_num_timesteps(event_idx), 'HF water depth timestep mismatch with input timesteps.'
-        hf_water_depth = np.maximum(0.0, hf_water_level - hf_elevation)
-        return hf_water_depth
-
-
-    def _get_hf_water_depth_hecras(self, event_idx: int):
-        hf_path = self.hf_paths[event_idx]
-
-        # get ghost cell indices to filter out
-        hf_elevation = get_min_cell_elevation(hf_path, self.area_name)
-        ghost_idx = np.where(np.isnan(hf_elevation))[0]
-
-        hf_water_level = get_water_level(hf_path, self.area_name)
-        hf_water_depth = np.maximum(0.0, hf_water_level - hf_elevation)
-        hf_water_depth = np.delete(hf_water_depth, ghost_idx, axis=1)
-        return hf_water_depth
-
-
     def _get_hf_dynamic_data(self, event_idx: int):
         """
         Extracts HF water depth (target) and LF-to-HF upsampled water depth (used to calculate residual).
@@ -348,47 +371,93 @@ class FloodEventDataset(Dataset):
         Upsampling is done by finding the WSE of the nearest LF neighbour for each HF cell and
         subtracting the HF cell elevation, then clamping to be nonnegative.
         """
-        # get lf water surface and upscale
-        area_name = 'BurnettRV_region' if self.area_name == 'BurnettRV' else self.area_name
-        lf_path = self.lf_hecras_paths[event_idx]
 
-        # get ghost cell indices to filter out
-        lf_elevation = get_min_cell_elevation(lf_path, area_name)
-        ghost_idx = np.where(np.isnan(lf_elevation))[0]
-
-        lf_timesteps = len(get_event_timesteps(lf_path))
-        hf_timesteps = self.num_timesteps[event_idx]
-
-        lf_water_level = get_water_level(lf_path, area_name)
-        lf_water_level = np.delete(lf_water_level, ghost_idx, axis=1)
-
-        # match timesteps
+        # get LF water level (not depth!) and HF water depth
         if self.area_name == 'Carlisle':
-            lf_water_level = lf_water_level[8:, :]
+            lf_water_level, _ = self._get_lf_wse_depth_carlisle(event_idx)
+            hf_water_depth = self._get_hf_water_depth_carlisle(event_idx)
         elif self.area_name == 'Chowilla':
-            pass # LF and HF already match
+            lf_water_level, _ = self._get_lf_wse_depth_chowilla(event_idx)
+            hf_water_depth = self._get_hf_water_depth_chowilla(event_idx)
         elif self.area_name == 'BurnettRV':
-            lf_water_level = lf_water_level[:hf_timesteps, :]
+            lf_water_level, _ = self._get_lf_wse_depth_burnett(event_idx)
+            hf_water_depth = self._get_hf_water_depth_burnett(event_idx)
         else:
-            raise NotImplementedError(f'Timestep matching not implemented for area {self.area_name}.')
+            raise NotImplementedError
 
-        if self.hf_filetype == 'npz':
-            hf_water_depth = self._get_hf_water_depth_npz(event_idx)
-        elif self.hf_filetype == 'hdf':
-            hf_water_depth = self._get_hf_water_depth_hecras(event_idx)
-        else:
-            assert False, f'Unsupported HF filetype {self.hf_filetype}.'
+        # upsample
+        hf_elevation = self._get_hf_geometry()['cell_elevation']
+        ups_water_level = self._upsample_water_level(lf_water_level, hf_elevation)
+        ups_water_depth = np.maximum(0.0, ups_water_level - hf_elevation)
 
-        # ---------- upscale LF to HF ----------
+        return hf_water_depth, ups_water_depth
+
+
+    def _upsample_water_level(self, lf_water_level, hf_elevation):
         lf_geom = self._get_lf_geometry()
         lf_coords = lf_geom['cell_coordinates']
         hf_geom = self._get_hf_geometry()
         hf_coords = hf_geom['cell_coordinates']
-        hf_elevation = hf_geom['cell_elevation']
 
         lf_kdtree = KDTree(lf_coords)
         dists, nearest_lf_indices = lf_kdtree.query(hf_coords)
-        lf_water_level_upscaled = lf_water_level[:, nearest_lf_indices]
+        ups_water_level = lf_water_level[:, nearest_lf_indices]
+        ups_water_level = filter_dry_areas(ups_water_level, hf_elevation)
 
-        upsampled_water_depth = np.maximum(0.0, lf_water_level_upscaled - hf_elevation)
-        return hf_water_depth, upsampled_water_depth
+        return ups_water_level
+
+
+    def _get_hf_water_depth_carlisle(self, event_idx: int):
+        """
+        Get HF water depth from npz file (Lisflood).
+        """
+        assert self.area_name == 'Carlisle', 'Mismatch between area name and function.'
+        hf_path = self.hf_paths[event_idx]
+        hf_data = np.load(hf_path)
+        hf_geom = self._get_hf_geometry()
+        hf_elevation = hf_geom['cell_elevation']
+
+        hf_water_level = hf_data['wse_data']
+        assert hf_water_level.shape[0] == self._get_num_timesteps(event_idx), 'HF water depth timestep mismatch with input timesteps.'
+        hf_water_level = filter_dry_areas(hf_water_level, hf_elevation)
+        hf_water_depth = np.maximum(0.0, hf_water_level - hf_elevation)
+
+        return hf_water_depth
+
+
+    def _get_hf_water_depth_chowilla(self, event_idx: int):
+        """
+        Get HF water depth from raw HECRAS file with ghost cells filtered out.
+        For Chowilla, use the default warmup period of 10 hours.
+        """
+        assert self.area_name == 'Chowilla', 'Mismatch between area name and function.'
+        hf_path = self.hf_paths[event_idx]
+        hf_elevation = get_min_cell_elevation(hf_path, 'Chowilla')
+        ghost_idx = np.where(np.isnan(hf_elevation))[0]
+        hf_elevation = np.delete(hf_elevation, ghost_idx)
+
+        hf_water_level = get_2d_hecras_results(hf_path, 'Chowilla', remove_ghost_cells=True)[0]  # Open dataset
+        assert hf_water_level.shape[0] == self._get_num_timesteps(event_idx), 'HF water depth timestep mismatch with input timesteps.'
+        hf_water_level = filter_dry_areas(hf_water_level, hf_elevation)
+        hf_water_depth = np.maximum(0.0, hf_water_level - hf_elevation)
+
+        return hf_water_depth
+
+    
+    def _get_hf_water_depth_burnett(self, event_idx: int):
+        """
+        Get HF water depth from npz file (Tuflow).
+        For Burnett, need to preprocess nan values.
+        """
+        assert self.area_name == 'BurnettRV', 'Mismatch between area name and function.'
+        hf_path = self.hf_paths[event_idx]
+        hf_data = np.load(hf_path)
+        hf_geom = self._get_hf_geometry()
+        hf_elevation = hf_geom['cell_elevation']
+
+        hf_water_level = np.nan_to_num(hf_data['wl_data'][48:,:], nan=-999) # Tuflow can have nans
+        assert hf_water_level.shape[0] == self._get_num_timesteps(event_idx), 'HF water depth timestep mismatch with input timesteps.'
+        hf_water_level = filter_dry_areas(hf_water_level, hf_elevation)
+        hf_water_depth = np.maximum(0.0, hf_water_level - hf_elevation)
+
+        return hf_water_depth

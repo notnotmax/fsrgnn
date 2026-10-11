@@ -248,10 +248,10 @@ def filter_timesteps(indices, event_ends, t_interval):
 
 if __name__ == '__main__':
     # print('----- Carlisle, t=2, 6-layer GNNs new model -----')
-    # train(area_name='Carlisle', mode='continue', identifier='2026-10-09', val_group=1, epochs_to_do=49) # 1hr10min per 5 epochs?
-    print('----- Chowilla, t=2, 6-layer GNNs new model -----')
-    train(area_name='Chowilla', mode='new', identifier='2026-10-09', val_group=1, epochs_to_do=100, seed=42)
-    # print('----- BurnettRV, t=4, 3-layer GNNs -----')
-    # train(area_name='BurnettRV', mode='new', identifier='2026-10-08', val_group=1, epochs_to_do=50) # if 6 layers, 50min per epoch
+    # train(area_name='Carlisle', mode='continue', identifier='2026-10-09', val_group=1, epochs_to_do=49, seed=42) # 1hr10min per 5 epochs?
+    # print('----- Chowilla, t=2, 6-layer GNNs new model -----')
+    # train(area_name='Chowilla', mode='new', identifier='2026-10-09', val_group=1, epochs_to_do=100, seed=42)
+    print('----- BurnettRV, t=8, 6-layer GNNs -----')
+    train(area_name='BurnettRV', mode='new', identifier='2026-10-09', val_group=1, epochs_to_do=50, seed=42) # if 6 layers, 50min per epoch
     # 6 layers: 
     # t=4: 6 layers: 50min, 3 layers: 30min

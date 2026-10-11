@@ -87,23 +87,14 @@ def make_dataset(area_name: str, val_group: int, mode: str):
     cat_data_path = os.path.join(DATASET_PATH, f'HF_EOF_analysis/Categories_HFdata_ValidateOnGrp_{val_group}.npz')
     feature_stats_path = f'data/{area_name}/feature_stats_fold_{val_group}.npz'
 
-    if area_name == 'Carlisle':
-        hf_filetype = 'npz'
-    elif area_name == 'Chowilla':
-        hf_filetype = 'hdf'
-    elif area_name == 'BurnettRV':
-        hf_filetype = 'npz'
-    else:
-        assert False, f'HF filetype for area {area_name} is unknown.'
-
     dataset = FloodEventDataset(
+        mode = mode,
         root_dir = f'data/{area_name}',
         area_name = area_name,
         lf_geometry_path = f'data/{area_name}/LF_geometry_data.npz',
         hf_geometry_path = f'data/{area_name}/HF_geometry_data.npz',
         lf_hecras_paths = lf_filepaths,
         hf_paths = hf_filepaths,
-        hf_filetype = hf_filetype,
         cat_data_path = cat_data_path,
         feature_stats_path = feature_stats_path,
         event_ids = event_ids,
@@ -174,24 +165,7 @@ def _get_all_event_timesteps_burnett():
         print('HF timesteps', hf_timesteps.shape)
 
 if __name__ == '__main__':
-    dataset = make_dataset(area_name='BurnettRV', val_group=1, mode='all')
-    print('processing')
-    dataset.process()
-    # area_name = 'Carlisle'
-    # geom = np.load(f'../dataset/BurnettRV/Geometry_data/Tuflow_Geometry_data.npz')
-    # eof_hfdata = np.load(f'../dataset/BurnettRV/HF_EOF_analysis/EOFanalysis_HFdata_WSE_ValidateOnGrp_1.npz')
-    # print(f'eof_hfdata {eof_hfdata.keys()}')
-    # ecs = np.load(f'../dataset/BurnettRV/HF_EOF_analysis/ECs_HFdata_ValidateOnGrp_1.npz')
-    # print(f'ecs {ecs.keys()}')
-    # print(f'shape {ecs['HF_ECs_train_WSE'].shape}')
-    # cats = np.load(f'../dataset/BurnettRV/HF_EOF_analysis/Categories_HFdata_ValidateOnGrp_1.npz')
-    # print(cats.keys())
-    # print(cats['wet_idx'].shape)
-    # hf_wd = np.load(f'data/{area_name}/processed/hf_water_depth_event_1.npy', mmap_mode='r')
-    # print(f'HF WD {hf_wd.shape}')
-    # lf_wd = np.load(f'data/{area_name}/processed/lf_dynamic_node_features_event_1.npy', mmap_mode='r')
-    # print(f'LF WD {lf_wd.shape}')
-    # ups_wd = np.load(f'data/{area_name}/processed/upsampled_water_depth_event_1.npy', mmap_mode='r')
-    # print(f'UPS WD {ups_wd.shape}')
-    # dataset.process() # if automatic processing doesn't happen
-    # get_all_event_timesteps_burnett()
+    AREA_NAME = 'BurnettRV'
+    print(f'Processing {AREA_NAME} dataset.')
+    dataset = make_dataset(area_name=AREA_NAME, val_group=1, mode='all')
+    dataset.process_all()
