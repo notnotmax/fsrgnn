@@ -11,7 +11,7 @@ from torch.utils.data import Subset
 from torch.optim import AdamW
 from torch.optim.lr_scheduler import ReduceLROnPlateau
 from torch_geometric.loader import DataLoader
-from data.make_dataset import make_dataset
+from data.make_dataset import make_dataset_one_group
 
 
 def set_seed(seed: int):
@@ -86,7 +86,7 @@ def train(area_name: str, mode: str, identifier: str, val_group: int, epochs_to_
         assert False, f'Unknown training mode: {mode}, should be "new" or "continue"'
 
     # ---------- prep datasets/loaders ----------
-    dataset = make_dataset(area_name=area_name, val_group=val_group, mode='train')
+    dataset = make_dataset_one_group(area_name=area_name, val_group=val_group, mode='train')
     ttsplit = np.load(f'../dataset/{area_name}/Train_test_split_data/Train_test_split_ValidateOnGrp_{val_group}.npz')
 
     # optionally filter indices to only use every <t_interval> timesteps from each event
@@ -151,7 +151,7 @@ def train(area_name: str, mode: str, identifier: str, val_group: int, epochs_to_
                     lf_dyn = batch.lf_dyn,
                     batch_size = batch.num_graphs
                 )
-            y_pred = batch.upsampled_water_depth + y_residual_pred
+            y_pred = batch.upsampled_water_depth + y_residual_pred.float()
             loss = masked_loss(
                 y_t = batch.hf_water_depth,
                 y_pred = y_pred,
@@ -176,7 +176,7 @@ def train(area_name: str, mode: str, identifier: str, val_group: int, epochs_to_
                         lf_dyn = batch.lf_dyn,
                         batch_size = batch.num_graphs
                     )
-                y_pred = batch.upsampled_water_depth + y_residual_pred
+                y_pred = batch.upsampled_water_depth + y_residual_pred.float()
                 val_loss = masked_loss(
                     y_t = batch.hf_water_depth,
                     y_pred = y_pred,

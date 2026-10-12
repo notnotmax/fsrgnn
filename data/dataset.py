@@ -65,7 +65,7 @@ class FloodEventDataset(Dataset):
         super().__init__(self.root, transform = None, pre_transform = None, pre_filter = None)
 
         if self.mode == 'all':
-            return
+            return # 'all' mode is for preprocessing, not training or evaluation
 
         # post-process call one-time loading of static features to reduce loading from disk
         static_features = np.load(self.STATIC_FEATURES_PATH)

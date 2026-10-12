@@ -1,6 +1,6 @@
 import matplotlib.pyplot as plt
 import numpy as np
-from data.make_dataset import make_dataset
+from data.make_dataset import make_dataset_one_event, make_dataset_one_group
 
 def plot_histogram(feature, title, xlabel, ylabel, output_path):
     
@@ -74,15 +74,19 @@ def plot_scatter(coords, feature, title, label, output_path):
     plt.close()
 
 def plot_line(x, y, title, xlabel, ylabel, output_path, ylim_bottom = None, ylim_top = None):
+    curves = y if isinstance(y, dict) else {None: y}
     plt.figure(figsize=(9, 7))
-    plt.plot(x, y)
+    for label, values in curves.items():
+        plt.plot(x, values, label=label)
     plt.title(title)
     plt.xlabel(xlabel)
     plt.ylabel(ylabel)
-    if ylim_bottom:
+    if ylim_bottom is not None:
         plt.ylim(bottom=ylim_bottom)
-    if ylim_top:
+    if ylim_top is not None:
         plt.ylim(top=ylim_top)
+    if len(curves) > 1:
+        plt.legend()
     plt.tight_layout()
     plt.savefig(output_path, dpi=300, bbox_inches='tight')
     print(f'Successfully saved plot at {output_path}')

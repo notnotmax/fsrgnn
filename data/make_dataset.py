@@ -10,8 +10,83 @@ import pandas as pd
 from data.dataset import FloodEventDataset
 from data.hecras_data_retrieval import get_event_timesteps
 
-def make_dataset(area_name: str, val_group: int, mode: str):
+def get_event_data_carlisle(event_summary, event_idx: int):
+    event_id = event_summary['No'][event_idx]
+    group_id = event_summary['Group'][event_idx]
+    lf_run_name = event_summary['HEC_RAS_plan'][event_idx]
+    lf_filepath = f'../dataset/Carlisle/HD_model_data/Low-fidelity/Carlisle_LFmodelA.{lf_run_name}.hdf'
+    hf_run_name = event_summary['Lisflood'][event_idx]
+    hf_filepath = f'../dataset/Carlisle/HD_model_data/High-fidelity/{hf_run_name}_alltimesteps.npz'
+    # hf_data = np.load(hf_filepath, mmap_mode='r') # slow
+    # num_timesteps = hf_data['wse_data'].shape[0]
+    EVENTS_NUM_TIMESTEPS = [266, 242, 198, 253, 318, 199, 266, 312, 316] # HF timesteps from code above
+    num_timesteps = EVENTS_NUM_TIMESTEPS[event_idx]
 
+    return event_id, group_id, lf_filepath, hf_filepath, num_timesteps
+
+
+def get_event_data_chowilla(event_summary, event_idx: int):
+    event_id = event_summary['Event'][event_idx]
+    group_id = event_summary['Group'][event_idx]
+    lf_run_name = event_summary['HEC_RAS_plan_LF'][event_idx]
+    lf_filepath = f'../dataset/Chowilla/HD_model_data/Low-fidelity/Chow_LF_modelG.{lf_run_name}.hdf'
+    hf_run_name = event_summary['HEC_RAS_plan_HF'][event_idx]
+    hf_filepath = f'../dataset/Chowilla/HD_model_data/High-fidelity/Chow_HF.{hf_run_name}.hdf'
+    num_timesteps = len(get_event_timesteps(lf_filepath)) # LF and HF have same num of timesteps TODO check this after filtering
+
+    return event_id, group_id, lf_filepath, hf_filepath, num_timesteps
+
+
+def get_event_data_burnett(event_summary, event_idx: int):
+    event_id = event_summary['No'][event_idx]
+    group_id = event_summary['Group'][event_idx]
+    lf_run_name = event_summary['HEC_RAS_plan'][event_idx]
+    lf_filepath = f'../dataset/BurnettRV/HD_model_data/Low-fidelity/BurnettRV_LFmodelB.{lf_run_name}.hdf'
+    hf_run_name = event_summary['tuflow_evt_name_old'][event_idx]
+    hf_filepath = f'../dataset/BurnettRV/HD_model_data/High-fidelity/Paradise_{hf_run_name}_002.npz'
+    hf_data = np.load(hf_filepath)
+    hf_timesteps = hf_data['time_data'].shape[0]
+    num_timesteps = hf_timesteps - 48 # trim 48 timesteps from the start of each HF run
+
+    return event_id, group_id, lf_filepath, hf_filepath, num_timesteps
+
+
+def make_dataset_one_event(area_name: str, event_idx: int):
+    EVENT_SUMMARY_PATH = f'../dataset/{area_name}/{area_name}_event_summary.csv'
+    event_summary = pd.read_csv(EVENT_SUMMARY_PATH)
+    assert 0 <= event_idx < len(event_summary), f'Event index {event_idx} out of bounds for event summary of length {len(event_summary)}.'
+
+    if area_name == 'Carlisle':
+        event_id, group_id, lf_filepath, hf_filepath, num_timesteps = get_event_data_carlisle(event_summary, event_idx)
+    elif area_name == 'Chowilla':
+        event_id, group_id, lf_filepath, hf_filepath, num_timesteps = get_event_data_chowilla(event_summary, event_idx)
+    elif area_name == 'BurnettRV':
+        event_id, group_id, lf_filepath, hf_filepath, num_timesteps = get_event_data_burnett(event_summary, event_idx)
+    else:
+        assert False, f'Unknown area name {area_name}.'
+
+    print(f'Added event (event id {event_id}, group id {group_id}) to dataset. '
+            f'Event has {num_timesteps} timesteps.')
+
+    dataset = FloodEventDataset(
+        mode = 'eval',
+        root_dir = f'data/{area_name}',
+        area_name = area_name,
+        lf_geometry_path = f'data/{area_name}/LF_geometry_data.npz',
+        hf_geometry_path = f'data/{area_name}/HF_geometry_data.npz',
+        lf_hecras_paths = [lf_filepath],
+        hf_paths = [hf_filepath],
+        cat_data_path = f'../dataset/{area_name}/HF_EOF_analysis/Categories_HFdata_ValidateOnGrp_{group_id}.npz',
+        feature_stats_path = f'data/{area_name}/feature_stats_fold_{group_id}.npz',
+        event_ids = [event_id],
+        group_ids = [group_id],
+        num_timesteps = [num_timesteps]
+    )
+
+    return dataset
+
+
+def make_dataset_one_group(area_name: str, val_group: int, mode: str):
     assert val_group > 0, 'Validation group should be 1-indexed (>0). Check the event summary to confirm otherwise.'
 
     print(f'Making {area_name} dataset on validation group {val_group} in mode "{mode}".')
@@ -19,17 +94,13 @@ def make_dataset(area_name: str, val_group: int, mode: str):
     EVENT_SUMMARY_PATH = os.path.join(DATASET_PATH, f'{area_name}_event_summary.csv')
     event_summary = pd.read_csv(EVENT_SUMMARY_PATH)
 
-    num_events = len(event_summary)
-    num_groups = np.max(event_summary['Group'])
-    print(f'Total: {num_events} events across {num_groups} groups.')
-
     event_ids = []
     group_ids = []
     lf_filepaths = []
     hf_filepaths = []
-    num_timesteps = []
+    events_num_timesteps = []
 
-    for event_idx in range(num_events):
+    for event_idx in range(len(event_summary)):
 
         group_id = event_summary['Group'][event_idx]
         if mode == 'train':
@@ -38,54 +109,27 @@ def make_dataset(area_name: str, val_group: int, mode: str):
         elif mode == 'eval':
             if group_id != val_group: # only add val group
                 continue
-        elif mode == 'all':
-            pass # add all events w/o filtering
         else:
-            assert False, f'Unknown dataset creation mode, should be "train", "eval" or "all"'
+            assert False, (f'Dataset creation mode for one group should be "train" (exclude events from this group)'
+                'or "eval" (only include events from this group).')
 
         if area_name == 'Carlisle':
-            event_id = event_summary['No'][event_idx]
-            lf_run_name = event_summary['HEC_RAS_plan'][event_idx]
-            lf_filepath = os.path.join(DATASET_PATH, f'HD_model_data/Low-fidelity/Carlisle_LFmodelA.{lf_run_name}.hdf')
-            hf_run_name = event_summary['Lisflood'][event_idx]
-            hf_filepath = os.path.join(DATASET_PATH, f'HD_model_data/High-fidelity/{hf_run_name}_alltimesteps.npz')
-            # hf_data = np.load(hf_filepath, mmap_mode='r') # slow
-            # event_num_timesteps = hf_data['wse_data'].shape[0]
-            EVENT_NUM_TIMESTEPS = [266, 242, 198, 253, 318, 199, 266, 312, 316] # HF timesteps from code above
-            event_num_timesteps = EVENT_NUM_TIMESTEPS[event_idx]
-
+            event_id, _, lf_filepath, hf_filepath, num_timesteps = get_event_data_carlisle(event_summary, event_idx)
         elif area_name == 'Chowilla':
-            event_id = event_summary['Event'][event_idx]
-            lf_run_name = event_summary['HEC_RAS_plan_LF'][event_idx]
-            lf_filepath = f'{DATASET_PATH}/HD_model_data/Low-fidelity/Chow_LF_modelG.{lf_run_name}.hdf'
-            hf_run_name = event_summary['HEC_RAS_plan_HF'][event_idx]
-            hf_filepath = f'{DATASET_PATH}/HD_model_data/High-fidelity/Chow_HF.{hf_run_name}.hdf'
-            event_num_timesteps = len(get_event_timesteps(lf_filepath)) # LF and HF have same num of timesteps
-
+            event_id, _, lf_filepath, hf_filepath, num_timesteps = get_event_data_chowilla(event_summary, event_idx)
         elif area_name == 'BurnettRV':
-            event_id = event_summary['No'][event_idx]
-            lf_run_name = event_summary['HEC_RAS_plan'][event_idx]
-            lf_filepath = f'../dataset/BurnettRV/HD_model_data/Low-fidelity/BurnettRV_LFmodelB.{lf_run_name}.hdf'
-            hf_run_name = event_summary['tuflow_evt_name_old'][event_idx]
-            hf_filepath = f'../dataset/BurnettRV/HD_model_data/High-fidelity/Paradise_{hf_run_name}_002.npz'
-            hf_data = np.load(hf_filepath)
-            hf_timesteps = hf_data['time_data'].shape[0]
-            event_num_timesteps = hf_timesteps - 48 # trim 48 timesteps from the start of each HF run
-
+            event_id, _, lf_filepath, hf_filepath, num_timesteps = get_event_data_burnett(event_summary, event_idx)
         else:
-            assert False, f"Unknown area name {area_name}."
+            assert False, f'Unknown area name {area_name}.'
 
         event_ids.append(event_id)
         group_ids.append(group_id)
         lf_filepaths.append(lf_filepath)
         hf_filepaths.append(hf_filepath)
-        num_timesteps.append(event_num_timesteps)
+        events_num_timesteps.append(num_timesteps)
 
-        print(f'Added event (event id {event_id}, group id {group_id}) to dataset. \
-                Event has {event_num_timesteps} timesteps.')
-
-    cat_data_path = os.path.join(DATASET_PATH, f'HF_EOF_analysis/Categories_HFdata_ValidateOnGrp_{val_group}.npz')
-    feature_stats_path = f'data/{area_name}/feature_stats_fold_{val_group}.npz'
+        print(f'Added event (event id {event_id}, group id {group_id}) to dataset. '
+                f'Event has {num_timesteps} timesteps.')
 
     dataset = FloodEventDataset(
         mode = mode,
@@ -95,16 +139,71 @@ def make_dataset(area_name: str, val_group: int, mode: str):
         hf_geometry_path = f'data/{area_name}/HF_geometry_data.npz',
         lf_hecras_paths = lf_filepaths,
         hf_paths = hf_filepaths,
-        cat_data_path = cat_data_path,
-        feature_stats_path = feature_stats_path,
+        cat_data_path = f'../dataset/{area_name}/HF_EOF_analysis/Categories_HFdata_ValidateOnGrp_{val_group}.npz',
+        feature_stats_path = f'data/{area_name}/feature_stats_fold_{val_group}.npz',
         event_ids = event_ids,
         group_ids = group_ids,
-        num_timesteps = num_timesteps
+        num_timesteps = events_num_timesteps
     )
 
-    print(f'Made {area_name} dataset, contains total {len(dataset)} timesteps.')
+    print(f'Made {area_name} dataset in "{mode}" mode. Contains {len(event_ids)} events and {len(dataset)} timesteps in total.')
 
     return dataset
+
+
+def make_dataset_all_events(area_name: str):
+    """
+    Creates a dataset using all event data to use in preprocessing and debugging.
+    Not intended for training or evaluation.
+    """
+    EVENT_SUMMARY_PATH = f'../dataset/{area_name}/{area_name}_event_summary.csv'
+    event_summary = pd.read_csv(EVENT_SUMMARY_PATH)
+
+    event_ids = []
+    group_ids = []
+    lf_filepaths = []
+    hf_filepaths = []
+    events_num_timesteps = []
+
+    for event_idx in range(len(event_summary)):
+
+        if area_name == 'Carlisle':
+            event_id, group_id, lf_filepath, hf_filepath, num_timesteps = get_event_data_carlisle(event_summary, event_idx)
+        elif area_name == 'Chowilla':
+            event_id, group_id, lf_filepath, hf_filepath, num_timesteps = get_event_data_chowilla(event_summary, event_idx)
+        elif area_name == 'BurnettRV':
+            event_id, group_id, lf_filepath, hf_filepath, num_timesteps = get_event_data_burnett(event_summary, event_idx)
+        else:
+            assert False, f'Unknown area name {area_name}.'
+        
+        event_ids.append(event_id)
+        group_ids.append(group_id)
+        lf_filepaths.append(lf_filepath)
+        hf_filepaths.append(hf_filepath)
+        events_num_timesteps.append(num_timesteps)
+
+        print(f'Added event (event id {event_id}, group id {group_id}) to dataset. '
+                f'Event has {num_timesteps} timesteps.')
+
+    dataset = FloodEventDataset(
+        mode = 'all',
+        root_dir = f'data/{area_name}',
+        area_name = area_name,
+        lf_geometry_path = f'data/{area_name}/LF_geometry_data.npz',
+        hf_geometry_path = f'data/{area_name}/HF_geometry_data.npz',
+        lf_hecras_paths = lf_filepaths,
+        hf_paths = hf_filepaths,
+        cat_data_path = None,
+        feature_stats_path = None,
+        event_ids = event_ids,
+        group_ids = group_ids,
+        num_timesteps = events_num_timesteps
+    )
+
+    print(f'Made {area_name} dataset in "all" mode. Contains {len(event_ids)} events and {len(dataset)} timesteps in total.')
+
+    return dataset
+
 
 def _get_all_event_timesteps_carlisle():
     # CARLISLE always has time difference 8 between LF and HF runs

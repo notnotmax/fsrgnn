@@ -8,7 +8,7 @@ import torch
 import torch.nn as nn
 
 from data.dataset import FloodEventDataset
-from data.make_dataset import make_dataset
+from data.make_dataset import make_dataset_one_event, make_dataset_one_group
 from data.visuals import plot_line
 from model.fsrgnn import FSRGNN
 from sklearn.metrics import r2_score
@@ -18,100 +18,69 @@ from torch.optim.lr_scheduler import ReduceLROnPlateau
 from torch_geometric.loader import DataLoader
 
 
-def eval_upsampled(area_name: str):
-    METRICS_PATH = f'model/{area_name}/upsampled_metrics.json'
-    ev_summary = pd.read_csv(f'../dataset/{area_name}/{area_name}_event_summary.csv')
-    metrics = []
-    for event_idx in range(len(ev_summary)):
-        if area_name == 'BurnettRV':
-            event_id = ev_summary['No'][event_idx]
-            val_group = ev_summary['Group'][event_idx]
-        cat_data_path = f'../dataset/{area_name}/HF_EOF_analysis/Categories_HFdata_ValidateOnGrp_{val_group}.npz'
-        wet_idx = np.load(cat_data_path, allow_pickle=True)['wet_idx']
-        event_metrics = eval_upsampled_one_event(area_name, event_id=1, wet_idx=wet_idx)
-        metrics.append(event_metrics)
-        break
-    
-    with open(METRICS_PATH, 'w') as f:
-        json.dump(metrics, f, indent=4)
+def load_upsampled(area_name: str, event_id: str, wet_idx):
+    path = f'data/{area_name}/processed/upsampled_water_depth_event_{event_id}.npy'
+    return np.load(path, mmap_mode='r')[:, wet_idx]
 
 
 def eval_upsampled_one_event(area_name: str, event_id: str, wet_idx):
     print(f'Evaluating upsampled metrics for {area_name} event {event_id}.')
     ups_wd = np.load(f'data/{area_name}/processed/upsampled_water_depth_event_{event_id}.npy', mmap_mode='r')[:, wet_idx]
     hf_wd = np.load(f'data/{area_name}/processed/hf_water_depth_event_{event_id}.npy', mmap_mode='r')[:, wet_idx]
-    event_length = hf_wd.shape[0]
 
-    hf_bin = convert2binary(hf_wd)
-    ups_bin = convert2binary(ups_wd)
-
-    # CSI and RMSE over time
-    csi_per_t = csi_all_t(hf_bin, ups_bin)
-    squared_error = (ups_wd - hf_wd) ** 2
-    rmse_per_t = np.sqrt(np.mean(squared_error, axis=1))
-
-    t_range = np.arange(int(event_length))
-    plot_line(t_range, csi_per_t, title=f'Water Depth CSI ({area_name}, event {event_id})', xlabel='Timestep', ylabel='CSI',
-        ylim_bottom=0, ylim_top=1, output_path=f'model/{area_name}/upsampled_Ev_{event_id}_csi_t.png')
-    plot_line(t_range, rmse_per_t, title=f'Water Depth RMSE ({area_name}, event {event_id})', xlabel='Timestep', ylabel='RMSE',
-        ylim_bottom=0, output_path=f'model/{area_name}/upsampled_Ev_{event_id}_rmse_t.png')
-
-    # maximum flood extent (CSI)
-    hf_extent_max = hf_bin.max(axis=0)
-    ups_extent_max = ups_bin.max(axis=0)
-    _, _, ups_csi = pod_rfa_1tstep(hf_extent_max, ups_extent_max)
-
-    # peak water depth R2 and avg diff
-    hf_max_wd = np.max(hf_wd, axis=0)
-    ups_max_wd = np.max(ups_wd, axis=0)
-    max_wd_r2 = r2_score(hf_max_wd, ups_max_wd)
-    avg_peak_diff = np.mean(hf_max_wd - ups_max_wd)
-
-    # AvgRMSE (RMSE over time, averaged over nodes)
-    ups_rmse = np.mean(np.sqrt(np.mean(squared_error, axis=0)))
-
-    # fidelity index
-    ups_fi = fidelity_index(true=hf_wd, pred=ups_wd)
-
-    event_metrics = {
-        "event_id": str(event_id),
-        "num_timesteps": int(event_length),
-        "max_csi": float(ups_csi),
-        "max_wd_r2": float(max_wd_r2),
-        "avg_peak_diff": float(avg_peak_diff),
-        "rmse": float(ups_rmse),
-        "fi": float(ups_fi),
-    }
-
-    print(
-        f'Event {event_id}:\n'
-        f'Maximum flood extent CSI: {ups_csi:.6f}\n'
-        f'Max water depth R2: {max_wd_r2:.6f}\n'
-        f'Average peak water depth difference: {avg_peak_diff:.6f}\n'
-        f'Prediction RMSE: {ups_rmse:.6f}\n'
-        f'Fidelity Index: {ups_fi:.6f}\n'
-    )
+    event_metrics = get_metrics_one_event(area_name=area_name, event_id=event_id, identifier='upsampled', true_wd=hf_wd, pred_wd=ups_wd)
 
     return event_metrics
 
 
-def eval(area_name: str, identifier: str, val_group: int, one_event_only: bool = False):
+def eval_upsampled_all_events(area_name: str):
+    METRICS_PATH = f'model/{area_name}/upsampled_metrics.json'
+    ev_summary = pd.read_csv(f'../dataset/{area_name}/{area_name}_event_summary.csv')
+    metrics = []
+    for event_idx in range(len(ev_summary)):
+        if area_name == 'Carlisle' or area_name == 'BurnettRV':
+            event_id = ev_summary['No'][event_idx]
+        elif area_name == 'Chowilla':
+            event_id = event_summary['Event'][event_idx]
+        else:
+            raise NotImplementedError
+        val_group = ev_summary['Group'][event_idx]
+        cat_data_path = f'../dataset/{area_name}/HF_EOF_analysis/Categories_HFdata_ValidateOnGrp_{val_group}.npz'
+        wet_idx = np.load(cat_data_path, allow_pickle=True)['wet_idx']
+        event_metrics = eval_upsampled_one_event(area_name, event_id=event_id, wet_idx=wet_idx)
+        metrics.append(event_metrics)
+    
+    with open(METRICS_PATH, 'w') as f:
+        json.dump(metrics, f, indent=4)
+
+
+def eval_one_event(area_name: str, identifier: str, event_idx: int, plot_upsampled: bool = False):
     DEVICE = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+    EVENT_SUMMARY_PATH = f'../dataset/{area_name}/{area_name}_event_summary.csv'
+    event_summary = pd.read_csv(EVENT_SUMMARY_PATH)
+    if area_name == 'Carlisle' or area_name == 'BurnettRV':
+        event_id = event_summary['No'][event_idx]
+    elif area_name == 'Chowilla':
+        event_id = event_summary['Event'][event_idx]
+    else:
+        raise NotImplementedError
+    val_group = event_summary['Group'][event_idx]
+
     CHECKPOINT_PATH = f'model/{area_name}/{identifier}_Val_{val_group}_best.pt'
-    METRICS_PATH = f'model/{area_name}/{identifier}_Val_{val_group}_metrics.json'
+    METRICS_PATH = f'model/{area_name}/{identifier}_Ev_{event_id}_metrics.json'
 
     checkpoint = torch.load(CHECKPOINT_PATH, map_location=DEVICE)
     epoch = checkpoint['epoch']
     model_config = checkpoint['model_config']
     model_state_dict = checkpoint['model_state_dict']
     
-    print(f"Evaluating model from file {CHECKPOINT_PATH} on validation group {val_group}. Model was saved at {epoch} epochs.")
+    print(f"Evaluating model from file {CHECKPOINT_PATH} on event {event_id} (index {event_idx}). Model was saved at {epoch} epochs.")
 
     # ---------- prep datasets/loaders ----------
-    test_dataset = make_dataset(area_name=area_name, val_group=val_group, mode='eval')
+    test_dataset = make_dataset_one_event(area_name=area_name, event_idx=event_idx)
     test_loader = DataLoader(
         test_dataset,
-        batch_size=4,
+        batch_size=1 if area_name == 'BurnettRV' else 4,
         shuffle=False,
         num_workers=4,
         pin_memory=True)
@@ -125,7 +94,6 @@ def eval(area_name: str, identifier: str, val_group: int, one_event_only: bool =
     model.eval()
 
     wet_idx = test_dataset.wet_idx.to(DEVICE)
-    n_wet = wet_idx.numel()
 
     all_y_pred = []
     all_y_t = []
@@ -135,7 +103,6 @@ def eval(area_name: str, identifier: str, val_group: int, one_event_only: bool =
     with torch.inference_mode():
         num_hf_nodes = test_dataset.num_hf_nodes
 
-        counter = 0
         for batch in test_loader:
             batch = batch.to(DEVICE)
 
@@ -145,7 +112,7 @@ def eval(area_name: str, identifier: str, val_group: int, one_event_only: bool =
                     batch_size = batch.num_graphs
                 )
 
-            y_pred = torch.clamp(batch.upsampled_water_depth + y_residual_pred, min=0.0)
+            y_pred = torch.clamp(batch.upsampled_water_depth + y_residual_pred.float(), min=0.0)
             y_t = batch.hf_water_depth
 
             # unbatch into 2D shape and filter
@@ -155,9 +122,91 @@ def eval(area_name: str, identifier: str, val_group: int, one_event_only: bool =
             all_y_pred.append(y_pred_grid.cpu().numpy())
             all_y_t.append(y_t_grid.cpu().numpy())
 
-            counter += batch_size
-            if counter > 400:
-                break
+    # ---------- metrics ----------
+
+    hf_wd = np.concatenate(all_y_t, axis=0)
+    pred_wd = np.concatenate(all_y_pred, axis=0)
+
+    event_lengths = np.asarray(test_dataset.num_timesteps, dtype=np.int32)
+
+    assert event_lengths.sum() == hf_wd.shape[0], \
+        f'Mismatch between expected number of timesteps {event_lengths.sum()} and actual collected timesteps {hf_wd.shape[0]}'
+
+    event_ids = test_dataset.event_ids
+    assert len(event_ids) == len(event_lengths)
+
+    metrics = {
+        'epoch': int(epoch),
+        'events': []
+    }
+
+    ups_wd = None
+    if plot_upsampled:
+        ups_wd = np.asarray(load_upsampled(area_name, event_id, wet_idx.cpu().numpy()))
+    event_metrics = get_metrics_one_event(area_name, event_id, identifier, true_wd=hf_wd, pred_wd=pred_wd, ups_wd=ups_wd)
+    metrics['events'].append(event_metrics)
+
+    with open(METRICS_PATH, 'w') as f:
+        json.dump(metrics, f, indent=4)
+
+
+def eval_one_group(area_name: str, identifier: str, val_group: int):
+    DEVICE = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+    CHECKPOINT_PATH = f'model/{area_name}/{identifier}_Val_{val_group}_best.pt'
+    METRICS_PATH = f'model/{area_name}/{identifier}_Val_{val_group}_metrics.json'
+
+    checkpoint = torch.load(CHECKPOINT_PATH, map_location=DEVICE)
+    epoch = checkpoint['epoch']
+    model_config = checkpoint['model_config']
+    model_state_dict = checkpoint['model_state_dict']
+    
+    print(f"Evaluating model from file {CHECKPOINT_PATH} on validation group {val_group}. Model was saved at {epoch} epochs.")
+
+    # ---------- prep datasets/loaders ----------
+    test_dataset = make_dataset_one_group(area_name=area_name, val_group=val_group, mode='eval')
+    test_loader = DataLoader(
+        test_dataset,
+        batch_size=1 if area_name == 'BurnettRV' else 4,
+        shuffle=False,
+        num_workers=4,
+        pin_memory=True)
+
+    # ---------- make model ----------
+    print('Creating model...')
+    model = FSRGNN(**model_config)
+    model.init_static_features(test_dataset.STATIC_FEATURES_PATH)
+    model.to(DEVICE)
+    model.load_state_dict(model_state_dict)
+    model.eval()
+
+    wet_idx = test_dataset.wet_idx.to(DEVICE)
+
+    all_y_pred = []
+    all_y_t = []
+
+    print('Evaluating...')
+
+    with torch.inference_mode():
+        num_hf_nodes = test_dataset.num_hf_nodes
+
+        for batch in test_loader:
+            batch = batch.to(DEVICE)
+
+            with torch.autocast(device_type='cuda', dtype=torch.bfloat16):
+                y_residual_pred = model(
+                    lf_dyn = batch.lf_dyn,
+                    batch_size = batch.num_graphs
+                )
+
+            y_pred = torch.clamp(batch.upsampled_water_depth + y_residual_pred.float(), min=0.0)
+            y_t = batch.hf_water_depth
+
+            # unbatch into 2D shape and filter
+            y_pred_grid = y_pred.view(batch.num_graphs, num_hf_nodes)[:, wet_idx]
+            y_t_grid = y_t.view(batch.num_graphs, num_hf_nodes)[:, wet_idx]
+
+            all_y_pred.append(y_pred_grid.cpu().numpy())
+            all_y_t.append(y_t_grid.cpu().numpy())
 
     # ---------- metrics ----------
 
@@ -187,62 +236,78 @@ def eval(area_name: str, identifier: str, val_group: int, one_event_only: bool =
         pred_wd = pred_all[start_t:end_t]
         start_t = end_t
 
-        hf_bin = convert2binary(hf_wd)
-        pred_bin = convert2binary(pred_wd)
-
-        # CSI and RMSE over time
-        csi_per_t = csi_all_t(hf_bin, pred_bin)
-        squared_error = (pred_wd - hf_wd) ** 2
-        rmse_per_t = np.sqrt(np.mean(squared_error, axis=1))
-
-        t_range = np.arange(int(event_length))
-        plot_line(t_range, csi_per_t, title=f'Water Depth CSI ({area_name}, event {event_id})', xlabel='Timestep', ylabel='CSI',
-            ylim_bottom=0, ylim_top=1, output_path=f'model/{area_name}/{identifier}_Ev_{event_id}_csi_t.png')
-        plot_line(t_range, rmse_per_t, title=f'Water Depth RMSE ({area_name}, event {event_id})', xlabel='Timestep', ylabel='RMSE',
-            ylim_bottom=0, output_path=f'model/{area_name}/{identifier}_Ev_{event_id}_rmse_t.png')
-    
-        # maximum flood extent (CSI)
-        hf_extent_max = hf_bin.max(axis=0)
-        pred_extent_max = pred_bin.max(axis=0)
-        _, _, pred_csi = pod_rfa_1tstep(hf_extent_max, pred_extent_max)
-
-        # peak water depth R2 and avg diff
-        hf_max_wd = np.max(hf_wd, axis=0)
-        pred_max_wd = np.max(pred_wd, axis=0)
-        max_wd_r2 = r2_score(hf_max_wd, pred_max_wd)
-        avg_peak_diff = np.mean(hf_max_wd - pred_max_wd)
-
-        # AvgRMSE (RMSE over time, averaged over nodes)
-        pred_rmse = np.mean(np.sqrt(np.mean(squared_error, axis=0)))
-
-        # fidelity index
-        pred_fi = fidelity_index(true=hf_wd, pred=pred_wd)
-
-        event_metrics = {
-            "event_id": str(event_id),
-            "num_timesteps": int(event_length),
-            "max_csi": float(pred_csi),
-            "max_wd_r2": float(max_wd_r2),
-            "avg_peak_diff": float(avg_peak_diff),
-            "rmse": float(pred_rmse),
-            "fi": float(pred_fi),
-        }
-        metrics["events"].append(event_metrics)
-
-        print(
-            f'Event {event_id}:\n'
-            f'Maximum flood extent CSI: {pred_csi:.6f}\n'
-            f'Max water depth R2: {max_wd_r2:.6f}\n'
-            f'Average peak water depth difference: {avg_peak_diff:.6f}\n'
-            f'Prediction RMSE: {pred_rmse:.6f}\n'
-            f'Fidelity Index: {pred_fi:.6f}\n'
-        )
-
-        if one_event_only:
-            break
+        event_metrics = get_metrics_one_event(area_name, event_id, identifier, true_wd=hf_wd, pred_wd=pred_wd)
+        metrics['events'].append(event_metrics)
 
     with open(METRICS_PATH, 'w') as f:
         json.dump(metrics, f, indent=4)
+
+
+def get_metrics_one_event(area_name: str, event_id: str, identifier: str, true_wd, pred_wd, ups_wd = None):
+    assert true_wd.shape[0] == pred_wd.shape[0], 'Mismatch in number of timesteps between true and pred arrays.'
+    num_timesteps = true_wd.shape[0]
+
+    true_bin = convert2binary(true_wd)
+    pred_bin = convert2binary(pred_wd)
+
+    # CSI and RMSE over time
+    csi_per_t = csi_all_t(true_bin, pred_bin)
+    squared_error = (pred_wd - true_wd) ** 2
+    rmse_per_t = np.sqrt(np.mean(squared_error, axis=1))
+
+    csi_curves = {'Model': csi_per_t}
+    rmse_curves = {'Model': rmse_per_t}
+
+    if ups_wd is not None: # plot upsampled curve onto the same plot for comparison
+        ups_bin = convert2binary(ups_wd)
+        csi_curves['Upsampled'] = csi_all_t(true_bin, ups_bin)
+        rmse_curves['Upsampled'] = np.sqrt(np.mean((ups_wd - true_wd) ** 2, axis=1))
+
+    t_range = np.arange(num_timesteps)
+    plot_line(t_range, csi_curves, title=f'Water Depth CSI ({area_name}, event {event_id})', xlabel='Timestep', ylabel='CSI',
+        ylim_bottom=0, ylim_top=1, output_path=f'model/{area_name}/{identifier}_Ev_{event_id}_csi_t.png')
+    plot_line(t_range, rmse_curves, title=f'Water Depth RMSE ({area_name}, event {event_id})', xlabel='Timestep', ylabel='RMSE',
+        ylim_bottom=0, output_path=f'model/{area_name}/{identifier}_Ev_{event_id}_rmse_t.png')
+
+    # maximum flood extent (CSI)
+    true_extent_max = true_bin.max(axis=0)
+    pred_extent_max = pred_bin.max(axis=0)
+    _, _, pred_csi = pod_rfa_1tstep(true_extent_max, pred_extent_max)
+
+    # peak water depth R2 and avg peak diff
+    true_max_wd = np.max(true_wd, axis=0)
+    pred_max_wd = np.max(pred_wd, axis=0)
+    max_wd_r2 = r2_score(true_max_wd, pred_max_wd)
+    avg_peak_diff = np.mean(true_max_wd - pred_max_wd)
+
+    # AvgRMSE (RMSE over time, averaged over nodes)
+    pred_rmse = np.mean(np.sqrt(np.mean(squared_error, axis=0)))
+    del squared_error
+
+    # fidelity index
+    pred_fi = fidelity_index(true=true_wd, pred=pred_wd)
+
+    event_metrics = {
+        "event_id": str(event_id),
+        "num_timesteps": int(num_timesteps),
+        "max_csi": float(pred_csi),
+        "max_wd_r2": float(max_wd_r2),
+        "avg_peak_diff": float(avg_peak_diff),
+        "rmse": float(pred_rmse),
+        "fi": float(pred_fi),
+    }
+
+    print(
+        f'Event {event_id}:\n'
+        f'Maximum flood extent CSI: {pred_csi:.6f}\n'
+        f'Max water depth R2: {max_wd_r2:.6f}\n'
+        f'Average peak water depth difference: {avg_peak_diff:.6f}\n'
+        f'Prediction RMSE: {pred_rmse:.6f}\n'
+        f'Fidelity Index: {pred_fi:.6f}\n'
+    )
+
+    return event_metrics
+    
 
 # ---------- metric helper functions ---------- adapted from https://doi.org/10.26188/24312658
 
@@ -341,12 +406,12 @@ def read_stats(area_name: str, identifier: str, val_group: int):
 if __name__ == '__main__':
     print('---------- Evaluating ----------')
     # visualise_loss_curves(area_name='Carlisle', identifier='2026-10-09', val_group=1)
-    # eval(area_name='Carlisle', identifier='2026-10-09', val_group=1)
-    # print('---------- Evaluating 2 ----------')
+    # eval_one_event(area_name='Carlisle', identifier='2026-10-09', event_idx=0, plot_upsampled=True)
     # visualise_loss_curves(area_name='Chowilla', identifier='2026-10-09', val_group=1)
-    # eval(area_name='Chowilla', identifier='2026-10-09', val_group=1)
-    # eval(area_name='BurnettRV', identifier='2026-10-09', val_group=1, one_event_only=True)
-    eval_upsampled('BurnettRV')
+    # eval_one_event(area_name='Chowilla', identifier='2026-10-09', event_idx=0, plot_upsampled=True)
+    # visualise_loss_curves(area_name='BurnettRV', identifier='2026-10-09', val_group=1)
+    # eval_one_event(area_name='BurnettRV', identifier='2026-10-09', event_idx=0, plot_upsampled=True)
+    # eval_upsampled('BurnettRV')
     # read_stats('2026-10-02', val_group=1)
     
     # key format: [index, model]
@@ -355,17 +420,17 @@ if __name__ == '__main__':
     # 2: LSTM-SRR
     # 3: GP-EOF
     # 4: LSTM-EOF
-    # np.set_printoptions(precision=4, suppress=True)
-    # lsg_results = np.load(f'../dataset/Chowilla/Result_data/Validation_results.npz')
-    # lsg_csi = lsg_results['CSI'][:, 0]
-    # lsg_max_wd_r2 = lsg_results['MaxWD_R2'][:, 0]
-    # lsg_peak_diff = lsg_results['peak_diff'][:, 0]
-    # lsg_rmse = lsg_results['RMSE'][:, 0]
-    # lsg_fi = lsg_results['FI'][:, 0]
-    # print(f'----- LSG model evaluation metrics: -----')
-    # print(f'CSI: {lsg_csi}')
-    # print(f'Max WD R2: {lsg_max_wd_r2}')
-    # print(f'Peak diff: {lsg_peak_diff}')
-    # print(f'RMSE: {lsg_rmse}')
-    # print(f'FI: {lsg_fi}')
+    np.set_printoptions(precision=4, suppress=True)
+    lsg_results = np.load(f'../dataset/BurnettRV/Result_data/Validation_results.npz')
+    lsg_csi = lsg_results['CSI'][:, 0]
+    lsg_max_wd_r2 = lsg_results['MaxWD_R2'][:, 0]
+    lsg_peak_diff = lsg_results['peak_diff'][:, 0]
+    lsg_rmse = lsg_results['RMSE'][:, 0]
+    lsg_fi = lsg_results['FI'][:, 0]
+    print(f'----- LSG model evaluation metrics: -----')
+    print(f'CSI: {lsg_csi}')
+    print(f'Max WD R2: {lsg_max_wd_r2}')
+    print(f'Peak diff: {lsg_peak_diff}')
+    print(f'RMSE: {lsg_rmse}')
+    print(f'FI: {lsg_fi}')
 
