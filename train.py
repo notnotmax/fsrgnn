@@ -12,6 +12,7 @@ from torch.optim import AdamW
 from torch.optim.lr_scheduler import ReduceLROnPlateau
 from torch_geometric.loader import DataLoader
 from data.make_dataset import make_dataset_one_group
+from utils import get_feature_stats_file, get_train_test_indices, get_wet_idx
 
 
 def set_seed(seed: int):
@@ -87,12 +88,13 @@ def train(area_name: str, mode: str, identifier: str, val_group: int, epochs_to_
 
     # ---------- prep datasets/loaders ----------
     dataset = make_dataset_one_group(area_name=area_name, val_group=val_group, mode='train')
-    ttsplit = np.load(f'../dataset/{area_name}/Train_test_split_data/Train_test_split_ValidateOnGrp_{val_group}.npz')
+    idx_train, idx_val = get_train_test_indices(area_name=area_name, val_group=val_group)
+    assert idx_train.shape[0] + idx_val.shape[0] == len(dataset)
 
     # optionally filter indices to only use every <t_interval> timesteps from each event
     event_ends = np.cumsum(np.asarray(dataset.num_timesteps, dtype=np.int32))
-    idx_train = filter_timesteps(ttsplit['idx_train'], event_ends, t_interval)
-    idx_val = filter_timesteps(ttsplit['idx_test'], event_ends, t_interval)
+    idx_train = filter_timesteps(idx_train, event_ends, t_interval)
+    idx_val = filter_timesteps(idx_val, event_ends, t_interval)
     print(f'----- Using timestep interval {t_interval}: Training samples: {idx_train.shape}, Validation samples: {idx_val.shape} -----')
 
     train_dataset = Subset(dataset, idx_train)
@@ -113,15 +115,14 @@ def train(area_name: str, mode: str, identifier: str, val_group: int, epochs_to_
         shuffle=False,
         num_workers=4,
         persistent_workers=True,
-        pin_memory=True,
-        generator=g)
+        pin_memory=True)
 
     # constants for this fold/validation group
-    wet_idx = dataset.wet_idx.to(DEVICE)
+    wet_idx = torch.from_numpy(get_wet_idx(area_name=area_name, val_group=val_group)).long().to(DEVICE)
 
     # ---------- make model ----------
     print('Creating model...')
-    model = FSRGNN(**model_config)
+    model = FSRGNN(**model_config, feat_stats_file=get_feature_stats_file(area_name, val_group))
     model.init_static_features(dataset.STATIC_FEATURES_PATH)
     model.to(DEVICE)
     num_hf_nodes = model.num_hf_nodes
@@ -148,12 +149,13 @@ def train(area_name: str, mode: str, identifier: str, val_group: int, epochs_to_
             optimiser.zero_grad()
             with torch.autocast(device_type='cuda', dtype=torch.bfloat16):
                 y_residual_pred = model(
-                    lf_dyn = batch.lf_dyn,
+                    lf_wd = batch.lf_dyn_node,
+                    ups_wd = batch.ups_dyn_node,
                     batch_size = batch.num_graphs
                 )
-            y_pred = batch.upsampled_water_depth + y_residual_pred.float()
+            y_pred = batch.ups_dyn_node + y_residual_pred.float()
             loss = masked_loss(
-                y_t = batch.hf_water_depth,
+                y_t = batch.hf_wd,
                 y_pred = y_pred,
                 num_graphs = batch.num_graphs,
                 num_hf_nodes = num_hf_nodes,
@@ -173,12 +175,13 @@ def train(area_name: str, mode: str, identifier: str, val_group: int, epochs_to_
                 batch = batch.to(DEVICE)
                 with torch.autocast(device_type='cuda', dtype=torch.bfloat16):
                     y_residual_pred = model(
-                        lf_dyn = batch.lf_dyn,
+                        lf_wd = batch.lf_dyn_node,
+                        ups_wd = batch.ups_dyn_node,
                         batch_size = batch.num_graphs
                     )
-                y_pred = batch.upsampled_water_depth + y_residual_pred.float()
+                y_pred = batch.ups_dyn_node + y_residual_pred.float()
                 val_loss = masked_loss(
-                    y_t = batch.hf_water_depth,
+                    y_t = batch.hf_wd,
                     y_pred = y_pred,
                     num_graphs = batch.num_graphs,
                     num_hf_nodes = num_hf_nodes,
@@ -247,11 +250,9 @@ def filter_timesteps(indices, event_ends, t_interval):
 
 
 if __name__ == '__main__':
-    # print('----- Carlisle, t=2, 6-layer GNNs new model -----')
-    # train(area_name='Carlisle', mode='continue', identifier='2026-10-09', val_group=1, epochs_to_do=49, seed=42) # 1hr10min per 5 epochs?
+    print('----- Carlisle, t=2, 6-layer GNNs with ups wd as hf node feature -----')
+    train(area_name='Carlisle', mode='new', identifier='2026-10-14', val_group=1, epochs_to_do=50, seed=42)
     # print('----- Chowilla, t=2, 6-layer GNNs new model -----')
-    # train(area_name='Chowilla', mode='new', identifier='2026-10-09', val_group=1, epochs_to_do=100, seed=42)
-    print('----- BurnettRV, t=8, 6-layer GNNs -----')
-    train(area_name='BurnettRV', mode='new', identifier='2026-10-09', val_group=1, epochs_to_do=50, seed=42) # if 6 layers, 50min per epoch
-    # 6 layers: 
-    # t=4: 6 layers: 50min, 3 layers: 30min
+    # train(area_name='Chowilla', mode='new', identifier='2026-10-09', val_group=1, epochs_to_do=50, seed=42)
+    # print('----- BurnettRV, t=8, 6-layer GNNs -----')
+    # train(area_name='BurnettRV', mode='new', identifier='2026-10-09', val_group=1, epochs_to_do=50, seed=42)

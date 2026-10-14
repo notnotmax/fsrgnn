@@ -4,7 +4,22 @@ import h5py
 import numpy as np
 
 from datetime import datetime
-from utils.file_utils import read_hdf_file_as_numpy
+
+def get_property_from_path(dict: dict, dict_path: str, separator: str = '.'):
+    keys = dict_path.split(sep=separator)
+    d = dict
+    for key in keys:
+        if key in d:
+            d = d[key]
+        else:
+            raise KeyError(f'Key {key} not found in dictionary for path {dict_path}')
+    return d
+
+def read_hdf_file_as_numpy(filepath: str, property_path: str, separator: str = '.') -> np.ndarray:
+    with h5py.File(filepath, 'r') as hec:
+        data = get_property_from_path(hec, property_path, separator)
+        np_data = np.array(data)
+    return np_data
 
 def get_event_timesteps(filepath: str) -> np.ndarray:
     property_path = 'Results.Unsteady.Output.Output Blocks.Base Output.Unsteady Time Series.Time Date Stamp'

@@ -108,7 +108,8 @@ def eval_one_event(area_name: str, identifier: str, event_idx: int, plot_upsampl
 
             with torch.autocast(device_type='cuda', dtype=torch.bfloat16):
                 y_residual_pred = model(
-                    lf_dyn = batch.lf_dyn,
+                    lf_wd = batch.lf_dyn_node,
+                    ups_wd = batch.ups_dyn_node,
                     batch_size = batch.num_graphs
                 )
 
@@ -194,7 +195,8 @@ def eval_one_group(area_name: str, identifier: str, val_group: int):
 
             with torch.autocast(device_type='cuda', dtype=torch.bfloat16):
                 y_residual_pred = model(
-                    lf_dyn = batch.lf_dyn,
+                    lf_wd = batch.lf_dyn_node,
+                    ups_wd = batch.ups_dyn_node,
                     batch_size = batch.num_graphs
                 )
 

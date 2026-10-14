@@ -7,114 +7,108 @@ Part of preprocessing.
 import numpy as np
 import os
 import pandas as pd
-import h5py
+from utils import get_event_summary, get_train_test_indices, get_wet_idx
 
-from data.hecras_data_retrieval import get_min_cell_elevation, get_water_level, get_event_timesteps
 
 def get_feature_stats(area_name: str, val_group: int):
 
     print(f'Getting {area_name} feature statistics for fold {val_group}.')
-    DATASET_PATH = f'../dataset/{area_name}'
-    EVENT_SUMMARY_PATH = os.path.join(DATASET_PATH, f'{area_name}_event_summary.csv')
-    event_summary = pd.read_csv(EVENT_SUMMARY_PATH)
-
-    num_events = len(event_summary)
-    num_groups = np.max(event_summary['Group'])
-
-    ttsplit = np.load(f'../dataset/{area_name}/Train_test_split_data/Train_test_split_ValidateOnGrp_{val_group}.npz')
-    idx_train = ttsplit['idx_train']
-    idx_test = ttsplit['idx_test']
+    event_summary = get_event_summary(area_name)
+    idx_train, idx_test = get_train_test_indices(area_name, val_group)
 
     lf_water_depths = []
+    ups_water_depths = []
 
-    for event_idx in range(num_events):
-
+    for event_idx in range(len(event_summary)):
         group_id = event_summary['Group'][event_idx]
         if group_id == val_group:
             continue
 
         if area_name == 'Carlisle':
-            lf_run_name = event_summary['HEC_RAS_plan'][event_idx]
-            lf_filepath = os.path.join(DATASET_PATH, f'HD_model_data/Low-fidelity/Carlisle_LFmodelA.{lf_run_name}.hdf')
-            lf_water_depth = _get_lf_water_depth(lf_filepath, area_name)
-
+            event_id = event_summary['No'][event_idx]
         elif area_name == 'Chowilla':
-            lf_run_name = event_summary['HEC_RAS_plan_LF'][event_idx]
-            lf_filepath = f'../dataset/Chowilla/HD_model_data/Low-fidelity/Chow_LF_modelG.{lf_run_name}.hdf'
-            lf_water_depth = _get_lf_water_depth(lf_filepath, area_name)
-
+            event_id = event_summary['Event'][event_idx]
         elif area_name == 'BurnettRV':
-            lf_run_name = event_summary['HEC_RAS_plan'][event_idx]
-            lf_filepath = f'../dataset/BurnettRV/HD_model_data/Low-fidelity/BurnettRV_LFmodelB.{lf_run_name}.hdf'
-            hf_run_name = event_summary['tuflow_evt_name_old'][event_idx]
-            hf_filepath = f'../dataset/BurnettRV/HD_model_data/High-fidelity/Paradise_{hf_run_name}_002.npz'
-            hf_data = np.load(hf_filepath)
-            hf_timesteps = hf_data['time_data'].shape[0] - 48
-            lf_water_depth = _get_lf_water_depth(lf_filepath, 'BurnettRV_region', hf_timesteps)
-
+            event_id = event_summary['No'][event_idx]
         else:
-            assert False, f"unknown area name {area_name}."
-
+            raise NotImplementedError
+        
+        lf_water_depth = np.load(f'data/{area_name}/processed/lf_dyn_node_event_{event_id}.npy', mmap_mode='r')
         lf_water_depths.append(lf_water_depth)
+        ups_water_depth = np.load(f'data/{area_name}/processed/ups_dyn_node_event_{event_id}.npy', mmap_mode='r')
+        ups_water_depths.append(ups_water_depth)
 
-    lf_water_depths = np.vstack(lf_water_depths)
-    print(f'{lf_water_depths.shape[0]} timesteps in total for this fold.')
-    assert lf_water_depths.shape[0] == idx_train.shape[0] + idx_test.shape[0]
+    expected_timesteps = idx_train.shape[0] + idx_test.shape[0]
+    lf_timesteps = sum([a.shape[0] for a in lf_water_depths])
+    ups_timesteps = sum([a.shape[0] for a in ups_water_depths])
+    assert lf_timesteps == expected_timesteps, \
+        f'Mismatch in lf water depth timesteps. Expected {expected_timesteps}, got {lf_timesteps}.'
+    assert sum([a.shape[0] for a in ups_water_depths]) == idx_train.shape[0] + idx_test.shape[0], \
+        f'Mismatch in upsampled water depth timesteps. Expected {expected_timesteps}, got {ups_timesteps}.'
 
-    # calc stats
-    lf_water_depths = lf_water_depths[idx_train, :]
-    lf_water_depth_mean = np.mean(lf_water_depths)
-    lf_water_depth_std = np.std(lf_water_depths)
+    lf_wd_mean, lf_wd_std = _stream_stats(lf_water_depths, idx_train)
+    ups_wd_mean, ups_wd_std = _stream_stats(ups_water_depths, idx_train)
+
+    print(
+        f'lf wd mean: {lf_wd_mean}',
+        f'lf wd std: {lf_wd_std}',
+        f'ups wd mean: {ups_wd_mean}',
+        f'ups wd std: {ups_wd_std}',
+    )
 
     output_path = f'data/{area_name}/feature_stats_fold_{val_group}.npz'
     np.savez_compressed(
         output_path,
-        lf_water_depth_mean=lf_water_depth_mean,
-        lf_water_depth_std=lf_water_depth_std,
+        lf_wd_mean=lf_wd_mean,
+        lf_wd_std=lf_wd_std,
+        ups_wd_mean=ups_wd_mean,
+        ups_wd_std=ups_wd_std
     )
 
-    print(f"Saved {area_name} feature statistics (mean: {lf_water_depth_mean}, std: {lf_water_depth_std}) to {output_path}.")
+    print(f"Saved {area_name} feature statistics to {output_path}.")
 
-def _get_lf_water_depth(lf_path: str, area_name: str, hf_timesteps: int = -1):
 
-    # get ghost cell indices to filter out, assumed to be consistent across runs
-    lf_elevation = get_min_cell_elevation(lf_path, area_name)
-    ghost_idx = np.where(np.isnan(lf_elevation))[0]
+def _stream_stats(event_arrays, idx_train, chunk_size=64):
+    event_ends = np.cumsum(np.array([a.shape[0] for a in event_arrays]))
+    event_starts = np.concatenate(([0], event_ends[:-1]))
+    event_indices = np.searchsorted(event_ends, idx_train, side='right')
 
-    lf_water_level = get_water_level(lf_path, area_name)
-    lf_water_depth = np.maximum(0.0, lf_water_level - lf_elevation)
-    lf_water_depth = np.delete(lf_water_depth, ghost_idx, axis=1)
+    count, total, total_squares = 0, 0.0, 0.0
+    for e, arr in enumerate(event_arrays):
+        # change global indices to event local indices
+        local_indices = np.sort(idx_train[event_indices == e] - event_starts[e])
+        for i in range(0, len(local_indices), chunk_size):
+            x = arr[local_indices[i:i+chunk_size]]
+            x = x.astype(np.float64)
+            if not np.isfinite(x).all():
+                raise ValueError(f'Non-finite values in event array index {e}')
+            count += x.size
+            total += x.sum()
+            total_squares += np.square(x).sum()
 
-    if area_name == 'Carlisle':
-        lf_water_depth = lf_water_depth[8:, :]
-    elif area_name == 'Chowilla':
-        pass # LF and HF already same timesteps
-    elif area_name == 'BurnettRV_region':
-        # trim 48 from start of HF then trim as needed from end of LF to match
-        assert hf_timesteps > 0
-        lf_water_depth = lf_water_depth[:hf_timesteps, :]
+    mean = total / count
+    std = np.sqrt(max(total_squares / count - mean ** 2, 0.0))
+    return float(mean), float(std)
 
-    return lf_water_depth
 
+def _get_percentiles(area_name: str):
+    print(f'Getting LF water depth percentiles for {area_name}.')
+    event_summary = get_event_summary(area_name)
+    for event_idx in range(len(event_summary)):
+        if area_name == 'Carlisle':
+            event_id = event_summary['No'][event_idx]
+        elif area_name == 'Chowilla':
+            event_id = event_summary['Event'][event_idx]
+        elif area_name == 'BurnettRV':
+            event_id = event_summary['No'][event_idx]
+        else:
+            raise NotImplementedError
+        lf_wd = np.load(f'data/{area_name}/processed/lf_dyn_node_event_{event_id}.npy', mmap_mode='r')
+        print(f'Event {event_id}: 99: {np.percentile(lf_wd, 99):.3f}, 99.9: {np.percentile(lf_wd, 99.9):.3f},',
+            f'99.99: {np.percentile(lf_wd, 99.99):.3f}, max: {np.max(lf_wd):.3f}')
+        
 
 if __name__ == '__main__':
-    # TIME paddings for burnett
-    # 2, 8, 2, 0 (per fold)
-    # event_summary = pd.read_csv(f'../dataset/BurnettRV/BurnettRV_event_summary.csv')
-    # lf_run_name = event_summary['HEC_RAS_plan'][event_idx]
-    # lf_filepath = f'../dataset/BurnettRV/HD_model_data/Low-fidelity/BurnettRV_LFmodelB.{lf_run_name}.hdf'
-    # lf_path = f'../dataset/BurnettRV/HD_model_data/Low-fidelity/BurnettRV_LFmodelB.p12.hdf'
-    # # f = h5py.File(lf_path)
-    # # print(f['Geometry']['2D Flow Areas'].keys())
-    # # elev = get_min_cell_elevation(lf_path, 'Burnett')
-    # lf_timesteps = get_event_timesteps(lf_path)
-    # print('LF timesteps', lf_timesteps.shape)
-    # print(lf_timesteps[:5])
-    # # print(elev[0])
-    # hf_data = np.load(f'../dataset/BurnettRV/HD_model_data/High-fidelity/Paradise_e1971_real_slmin_1in2_002.npz')
-    # hf_timesteps = hf_data['time_data'] # or wl_data
-    # print('HF timesteps', hf_timesteps.shape)
-    # print(hf_timesteps[:5])
-
-    for i in range(1, 5):
-        get_feature_stats(area_name='BurnettRV', val_group=i)
+    _get_percentiles('BurnettRV')
+    # for i in range(1, 10):
+    #     get_feature_stats(area_name='Carlisle', val_group=i)

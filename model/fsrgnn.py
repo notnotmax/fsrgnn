@@ -14,6 +14,7 @@ class FSRGNN(Module):
         hf_edge_features: int,
         hidden_features: int,
         output_features: int,
+        feat_stats_file: str,
         mlp_layers: int = 2,
         lfgnn_layers: int = 6,
         hfgnn_layers: int = 6,
@@ -93,6 +94,12 @@ class FSRGNN(Module):
             layer_norm = False
         )
 
+        feature_stats = np.load(feat_stats_file)
+        self.lf_wd_mean = float(feature_stats['lf_wd_mean'])
+        self.lf_wd_std = float(feature_stats['lf_wd_std'])
+        self.ups_wd_mean = float(feature_stats['ups_wd_mean'])
+        self.ups_wd_std = float(feature_stats['ups_wd_std'])
+
         self.upsampler_k = upsampler_k
         self.num_lf_nodes = None
         self.num_hf_nodes = None
@@ -166,17 +173,24 @@ class FSRGNN(Module):
         return self._edge_cache[key]
 
 
-    def forward(self, lf_dyn: Tensor, batch_size: int) -> Tensor:
-        lf_x = torch.cat([self.lf_static_x.repeat(batch_size, 1), lf_dyn], dim=-1)
-        x_lf = self.lf_node_encoder(lf_x)
+    def forward(self, lf_wd: Tensor, ups_wd: Tensor, batch_size: int) -> Tensor:
+        EPS = 1e-8
+        lf_wd = (lf_wd - self.lf_wd_mean) / (self.lf_wd_std + EPS)
+        ups_wd = (ups_wd - self.ups_wd_mean) / (self.ups_wd_std + EPS)
+
+        x_lf = torch.cat([self.lf_static_x.repeat(batch_size, 1), lf_wd], dim=-1)
+        x_lf = self.lf_node_encoder(x_lf)
         e_lf = self.lf_edge_encoder(self.lf_edge_attr).repeat(batch_size, 1)
         x_lf, _ = self.lfgnn(
             x_lf,
             self._batched_edges('lf_edge_index', self.num_lf_nodes, batch_size),
             e_lf
         )
+
         x_ups = self.upsample(x_lf, batch_size)
-        x_hf = self.hf_node_encoder(self.hf_static_x).repeat(batch_size, 1)
+
+        x_hf = torch.cat([self.hf_static_x.repeat(batch_size, 1), ups_wd], dim=-1)
+        x_hf = self.hf_node_encoder(x_hf)
         e_hf = self.hf_edge_encoder(self.hf_edge_attr).repeat(batch_size, 1)
         x_hf, _ = self.hfgnn(
             torch.cat([x_ups, x_hf], dim=-1),
