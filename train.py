@@ -6,13 +6,15 @@ import time
 import torch
 import torch.nn as nn
 
+from loss import MSEBCELoss, HuberBCELoss
 from model.fsrgnn import FSRGNN
 from torch.utils.data import Subset
 from torch.optim import AdamW
 from torch.optim.lr_scheduler import ReduceLROnPlateau
 from torch_geometric.loader import DataLoader
 from data.make_dataset import make_dataset_one_group
-from utils import get_feature_stats_file, get_train_test_indices, get_wet_idx
+from utils import get_feature_stats_filepath, get_train_test_indices, get_wet_idx
+
 
 
 def set_seed(seed: int):
@@ -43,6 +45,8 @@ def train(area_name: str, mode: str, identifier: str, val_group: int, epochs_to_
         with open(CONFIG_PATH, 'r') as f:
             config = json.load(f)
             model_config = config['model_config']
+            loss_func_name = config['loss_func']
+            loss_config = config['loss_config']
             batch_size = config['batch_size']
             learning_rate = config['learning_rate']
             weight_decay = config['weight_decay']
@@ -54,6 +58,7 @@ def train(area_name: str, mode: str, identifier: str, val_group: int, epochs_to_
         start_epoch = 1
         best_val_loss = float('inf')
         loss_stats = {
+            'loss_func': loss_func_name,
             'epoch': [],
             'train_loss': [],
             'val_loss': []
@@ -65,6 +70,8 @@ def train(area_name: str, mode: str, identifier: str, val_group: int, epochs_to_
         with open(CONFIG_PATH, 'r') as f:
             config = json.load(f)
             model_config = config['model_config']
+            loss_func_name = config['loss_func']
+            loss_config = config['loss_config']
             batch_size = config['batch_size']
             learning_rate = config['learning_rate']
             weight_decay = config['weight_decay']
@@ -122,14 +129,20 @@ def train(area_name: str, mode: str, identifier: str, val_group: int, epochs_to_
 
     # ---------- make model ----------
     print('Creating model...')
-    model = FSRGNN(**model_config, feat_stats_file=get_feature_stats_file(area_name, val_group))
+    model = FSRGNN(**model_config, feat_stats_file=get_feature_stats_filepath(area_name, val_group))
     model.init_static_features(dataset.STATIC_FEATURES_PATH)
     model.to(DEVICE)
     num_hf_nodes = model.num_hf_nodes
 
     optimiser = AdamW(model.parameters(), lr=learning_rate, weight_decay=weight_decay)
     scheduler = ReduceLROnPlateau(optimiser, mode='min', factor=sch_factor, patience=sch_patience, min_lr=min_lr)
-    loss_func = nn.MSELoss()
+
+    if loss_func_name == 'mse':
+        loss_func = nn.MSELoss()
+    elif loss_func_name == 'mse_bce':
+        loss_func = MSEBCELoss(**loss_config)
+    else:
+        raise NotImplementedError
 
     if mode == 'continue':
         model.load_state_dict(model_state_dict)
@@ -150,10 +163,10 @@ def train(area_name: str, mode: str, identifier: str, val_group: int, epochs_to_
             with torch.autocast(device_type='cuda', dtype=torch.bfloat16):
                 y_residual_pred = model(
                     lf_wd = batch.lf_dyn_node,
-                    ups_wd = batch.ups_dyn_node,
+                    ups_wd = batch.ups_wd,
                     batch_size = batch.num_graphs
                 )
-            y_pred = batch.ups_dyn_node + y_residual_pred.float()
+            y_pred = batch.ups_wd + y_residual_pred.float()
             loss = masked_loss(
                 y_t = batch.hf_wd,
                 y_pred = y_pred,
@@ -176,10 +189,10 @@ def train(area_name: str, mode: str, identifier: str, val_group: int, epochs_to_
                 with torch.autocast(device_type='cuda', dtype=torch.bfloat16):
                     y_residual_pred = model(
                         lf_wd = batch.lf_dyn_node,
-                        ups_wd = batch.ups_dyn_node,
+                        ups_wd = batch.ups_wd,
                         batch_size = batch.num_graphs
                     )
-                y_pred = batch.ups_dyn_node + y_residual_pred.float()
+                y_pred = batch.ups_wd + y_residual_pred.float()
                 val_loss = masked_loss(
                     y_t = batch.hf_wd,
                     y_pred = y_pred,
@@ -235,7 +248,7 @@ def masked_loss(y_t, y_pred, num_graphs, num_hf_nodes, wet_idx, loss_func):
     y_pred_grid = y_pred_grid[:, wet_idx]
     y_t_grid = y_t_grid[:, wet_idx]
 
-    return loss_func(y_t_grid, y_pred_grid)
+    return loss_func(y_pred_grid, y_t_grid)
 
 
 def filter_timesteps(indices, event_ends, t_interval):
@@ -250,8 +263,8 @@ def filter_timesteps(indices, event_ends, t_interval):
 
 
 if __name__ == '__main__':
-    print('----- Carlisle, t=2, 6-layer GNNs with ups wd as hf node feature -----')
-    train(area_name='Carlisle', mode='new', identifier='2026-10-14', val_group=1, epochs_to_do=50, seed=42)
+    print('----- Carlisle, with MSE-BCE loss -----')
+    train(area_name='Carlisle', mode='continue', identifier='2026-10-17e', val_group=1, epochs_to_do=50, seed=42)
     # print('----- Chowilla, t=2, 6-layer GNNs new model -----')
     # train(area_name='Chowilla', mode='new', identifier='2026-10-09', val_group=1, epochs_to_do=50, seed=42)
     # print('----- BurnettRV, t=8, 6-layer GNNs -----')

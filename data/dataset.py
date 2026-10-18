@@ -7,17 +7,16 @@ from data.hecras_data_retrieval import get_min_cell_elevation
 from data.HECRAS_functions import filter_dry_areas, get_2d_hecras_results
 from scipy.spatial import KDTree
 from torch_geometric.data import Data, Dataset
+from utils import get_lf_dyn_node_filepath, get_ups_wd_filepath, get_hf_wd_filepath, get_static_features_filepath
 
 DEPTH_CAP = {'Carlisle': 9.0, 'Chowilla': 15.0, 'BurnettRV': 27.0}
 
 class FloodEventDataset(Dataset):
     """
     Static lf node features: area, elevation, roughness
-    Dynamic lf node features: water depth
+    Dynamic lf node features: LF water depth
     Static lf edge features: edge length
     Static hf node features: area, elevation
-    Dynamic hf node features: upsampled water depth
-
     Target: residual water depth at hf nodes
     """
 
@@ -49,15 +48,11 @@ class FloodEventDataset(Dataset):
         self.num_timesteps = num_timesteps
 
         # preset filenames to save into in processed dir
-        self.STATIC_FEATURES_FILE = 'static_features.npz'
-        self.STATIC_FEATURES_PATH = os.path.join(self.processed_dir, self.STATIC_FEATURES_FILE)
+        self.STATIC_FEATURES_PATH = get_static_features_filepath(self.area_name)
 
-        self.LF_DYN_NODE_PATHS = [os.path.join(self.processed_dir, f'lf_dyn_node_event_{event_id}.npy') \
-                                        for event_id in self.event_ids]
-        self.UPS_DYN_NODE_PATHS = [os.path.join(self.processed_dir, f'ups_dyn_node_event_{event_id}.npy') \
-                                        for event_id in self.event_ids]
-        self.HF_WD_PATHS = [os.path.join(self.processed_dir, f'hf_wd_event_{event_id}.npy') \
-                                        for event_id in self.event_ids]
+        self.LF_DYN_NODE_PATHS = [get_lf_dyn_node_filepath(area_name, event_id) for event_id in self.event_ids]
+        self.UPS_WD_PATHS = [get_ups_wd_filepath(area_name, event_id) for event_id in self.event_ids]
+        self.HF_WD_PATHS = [get_hf_wd_filepath(area_name, event_id) for event_id in self.event_ids]
 
         self.dynamic_data_per_event = {} # caching
 
@@ -79,7 +74,8 @@ class FloodEventDataset(Dataset):
 
     @property
     def processed_file_names(self):
-        return [self.STATIC_FEATURES_FILE] # TODO
+        # call process_all manually
+        return []
 
 
     def download(self):
@@ -120,21 +116,21 @@ class FloodEventDataset(Dataset):
         for i, event_id in enumerate(self.event_ids):
             print(f'Getting dynamic values for event {i+1} / {len(self.event_ids)}, event ID: {event_id}')
             lf_dyn_node = self._get_lf_dynamic_node_features(event_idx=i)
-            hf_wd, ups_dyn_node = self._get_hf_dynamic_data(event_idx=i)
+            hf_wd, ups_wd = self._get_hf_dynamic_data(event_idx=i)
 
             assert lf_dyn_node.shape[0] == self.num_timesteps[i], \
                 f'LF timestep mismatch for event {event_id}. Expected {self.num_timesteps[i]}, got {lf_dyn_node.shape[0]}.'
             assert hf_wd.shape[0] == self.num_timesteps[i], \
                 f'HF timestep mismatch for event {event_id}. Expected {self.num_timesteps[i]}, got {hf_wd.shape[0]}.'
-            assert ups_dyn_node.shape == hf_wd.shape, \
-                f'Mismatch in shape between upsampled and HF water depth. ups: {ups_dyn_node.shape}, HF: {hf_wd.shape}'
+            assert ups_wd.shape == hf_wd.shape, \
+                f'Mismatch in shape between upsampled and HF water depth. ups: {ups_wd.shape}, HF: {hf_wd.shape}'
 
             np.save(self.LF_DYN_NODE_PATHS[i], lf_dyn_node.astype(np.float32))
-            np.save(self.UPS_DYN_NODE_PATHS[i], ups_dyn_node.astype(np.float32))
+            np.save(self.UPS_WD_PATHS[i], ups_wd.astype(np.float32))
             np.save(self.HF_WD_PATHS[i], hf_wd.astype(np.float32))
 
             print(f'Saved dynamic values for event {event_id}.')
-            del lf_dyn_node, ups_dyn_node, hf_wd
+            del lf_dyn_node, ups_wd, hf_wd
 
         VAL_GROUPS = {'Carlisle': 9, 'Chowilla': 10, 'BurnettRV': 4}
         assert self.area_name in VAL_GROUPS, f'Loading of dynamic feature statistics for {self.area_name} not set.'
@@ -153,8 +149,8 @@ class FloodEventDataset(Dataset):
                 "lf_dyn_node": np.load(
                     self.LF_DYN_NODE_PATHS[event_idx], mmap_mode="r"
                 ),
-                "ups_dyn_node": np.load(
-                    self.UPS_DYN_NODE_PATHS[event_idx], mmap_mode="r"
+                "ups_wd": np.load(
+                    self.UPS_WD_PATHS[event_idx], mmap_mode="r"
                 ),
                 "hf_wd": np.load(
                     self.HF_WD_PATHS[event_idx], mmap_mode="r"
@@ -185,15 +181,15 @@ class FloodEventDataset(Dataset):
         lf_dyn_node = dynamic_data['lf_dyn_node'][timestep_in_event]
         lf_dyn_node = torch.from_numpy(lf_dyn_node).float().unsqueeze(-1)
 
-        ups_dyn_node = dynamic_data['ups_dyn_node'][timestep_in_event]
-        ups_dyn_node = torch.from_numpy(ups_dyn_node).float().unsqueeze(-1)
+        ups_wd = dynamic_data['ups_wd'][timestep_in_event]
+        ups_wd = torch.from_numpy(ups_wd).float().unsqueeze(-1)
 
         hf_wd = dynamic_data['hf_wd'][timestep_in_event]
         hf_wd = torch.from_numpy(hf_wd).float().unsqueeze(-1)
 
         data = Data(
             lf_dyn_node = lf_dyn_node,
-            ups_dyn_node = ups_dyn_node,
+            ups_wd = ups_wd,
             hf_wd = hf_wd,
 
             # for PyG
@@ -282,6 +278,7 @@ class FloodEventDataset(Dataset):
         """
         Get LF water level and depth from raw HECRAS file with ghost cells filtered out.
         For Chowilla, use the default warmup period of 10 hours.
+        Trims 41 timesteps.
         """
         assert self.area_name == 'Chowilla', 'Mismatch between area name and function.'
 

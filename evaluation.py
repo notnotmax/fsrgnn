@@ -1,33 +1,38 @@
 import json
-import math
 import matplotlib.pyplot as plt
 import numpy as np
-import os
 import pandas as pd
 import torch
-import torch.nn as nn
 
-from data.dataset import FloodEventDataset
 from data.make_dataset import make_dataset_one_event, make_dataset_one_group
 from data.visuals import plot_line
 from model.fsrgnn import FSRGNN
 from sklearn.metrics import r2_score
-from torch.utils.data import Subset
-from torch.optim import AdamW
-from torch.optim.lr_scheduler import ReduceLROnPlateau
 from torch_geometric.loader import DataLoader
+from utils import get_event_summary, get_feature_stats_filepath, get_wet_idx, \
+    get_ups_wd_filepath, get_hf_wd_filepath
 
 
 def load_upsampled(area_name: str, event_id: str, wet_idx):
-    path = f'data/{area_name}/processed/upsampled_water_depth_event_{event_id}.npy'
+    path = get_ups_wd_filepath(area_name, event_id)
     return np.load(path, mmap_mode='r')[:, wet_idx]
 
 
-def eval_upsampled_one_event(area_name: str, event_id: str, wet_idx):
+def eval_upsampled_one_event(area_name: str, event_idx: int):
+    event_summary = get_event_summary(area_name)
+    if area_name == 'Carlisle' or area_name == 'BurnettRV':
+        event_id = event_summary['No'][event_idx]
+    elif area_name == 'Chowilla':
+        event_id = event_summary['Event'][event_idx]
+    else:
+        raise NotImplementedError
     print(f'Evaluating upsampled metrics for {area_name} event {event_id}.')
-    ups_wd = np.load(f'data/{area_name}/processed/upsampled_water_depth_event_{event_id}.npy', mmap_mode='r')[:, wet_idx]
-    hf_wd = np.load(f'data/{area_name}/processed/hf_water_depth_event_{event_id}.npy', mmap_mode='r')[:, wet_idx]
 
+    val_group = event_summary['Group'][event_idx]
+    wet_idx = get_wet_idx(area_name, val_group)
+
+    ups_wd = np.load(get_ups_wd_filepath(area_name, event_id), mmap_mode='r')[:, wet_idx]
+    hf_wd = np.load(get_hf_wd_filepath(area_name, event_id), mmap_mode='r')[:, wet_idx]
     event_metrics = get_metrics_one_event(area_name=area_name, event_id=event_id, identifier='upsampled', true_wd=hf_wd, pred_wd=ups_wd)
 
     return event_metrics
@@ -35,19 +40,9 @@ def eval_upsampled_one_event(area_name: str, event_id: str, wet_idx):
 
 def eval_upsampled_all_events(area_name: str):
     METRICS_PATH = f'model/{area_name}/upsampled_metrics.json'
-    ev_summary = pd.read_csv(f'../dataset/{area_name}/{area_name}_event_summary.csv')
     metrics = []
-    for event_idx in range(len(ev_summary)):
-        if area_name == 'Carlisle' or area_name == 'BurnettRV':
-            event_id = ev_summary['No'][event_idx]
-        elif area_name == 'Chowilla':
-            event_id = event_summary['Event'][event_idx]
-        else:
-            raise NotImplementedError
-        val_group = ev_summary['Group'][event_idx]
-        cat_data_path = f'../dataset/{area_name}/HF_EOF_analysis/Categories_HFdata_ValidateOnGrp_{val_group}.npz'
-        wet_idx = np.load(cat_data_path, allow_pickle=True)['wet_idx']
-        event_metrics = eval_upsampled_one_event(area_name, event_id=event_id, wet_idx=wet_idx)
+    for event_idx in range(len(event_summary)):
+        event_metrics = eval_upsampled_one_event(area_name, event_idx=event_idx)
         metrics.append(event_metrics)
     
     with open(METRICS_PATH, 'w') as f:
@@ -56,8 +51,7 @@ def eval_upsampled_all_events(area_name: str):
 
 def eval_one_event(area_name: str, identifier: str, event_idx: int, plot_upsampled: bool = False):
     DEVICE = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
-    EVENT_SUMMARY_PATH = f'../dataset/{area_name}/{area_name}_event_summary.csv'
-    event_summary = pd.read_csv(EVENT_SUMMARY_PATH)
+    event_summary = get_event_summary(area_name)
     if area_name == 'Carlisle' or area_name == 'BurnettRV':
         event_id = event_summary['No'][event_idx]
     elif area_name == 'Chowilla':
@@ -87,13 +81,13 @@ def eval_one_event(area_name: str, identifier: str, event_idx: int, plot_upsampl
 
     # ---------- make model ----------
     print('Creating model...')
-    model = FSRGNN(**model_config)
+    model = FSRGNN(**model_config, feat_stats_file=get_feature_stats_filepath(area_name, val_group))
     model.init_static_features(test_dataset.STATIC_FEATURES_PATH)
     model.to(DEVICE)
     model.load_state_dict(model_state_dict)
     model.eval()
 
-    wet_idx = test_dataset.wet_idx.to(DEVICE)
+    wet_idx = torch.from_numpy(get_wet_idx(area_name=area_name, val_group=val_group)).long().to(DEVICE)
 
     all_y_pred = []
     all_y_t = []
@@ -109,12 +103,12 @@ def eval_one_event(area_name: str, identifier: str, event_idx: int, plot_upsampl
             with torch.autocast(device_type='cuda', dtype=torch.bfloat16):
                 y_residual_pred = model(
                     lf_wd = batch.lf_dyn_node,
-                    ups_wd = batch.ups_dyn_node,
+                    ups_wd = batch.ups_wd,
                     batch_size = batch.num_graphs
                 )
 
-            y_pred = torch.clamp(batch.upsampled_water_depth + y_residual_pred.float(), min=0.0)
-            y_t = batch.hf_water_depth
+            y_pred = torch.clamp(batch.ups_wd + y_residual_pred.float(), min=0.0)
+            y_t = batch.hf_wd
 
             # unbatch into 2D shape and filter
             y_pred_grid = y_pred.view(batch.num_graphs, num_hf_nodes)[:, wet_idx]
@@ -127,6 +121,9 @@ def eval_one_event(area_name: str, identifier: str, event_idx: int, plot_upsampl
 
     hf_wd = np.concatenate(all_y_t, axis=0)
     pred_wd = np.concatenate(all_y_pred, axis=0)
+
+    np.save(f'model/{area_name}/{identifier}_Ev_1_pred_wd.npy', pred_wd.astype(np.float32))
+    return
 
     event_lengths = np.asarray(test_dataset.num_timesteps, dtype=np.int32)
 
@@ -143,7 +140,8 @@ def eval_one_event(area_name: str, identifier: str, event_idx: int, plot_upsampl
 
     ups_wd = None
     if plot_upsampled:
-        ups_wd = np.asarray(load_upsampled(area_name, event_id, wet_idx.cpu().numpy()))
+        ups_wd = np.load(get_ups_wd_filepath(area_name, event_id), mmap_mode='r')[:, wet_idx.cpu().numpy()]
+
     event_metrics = get_metrics_one_event(area_name, event_id, identifier, true_wd=hf_wd, pred_wd=pred_wd, ups_wd=ups_wd)
     metrics['events'].append(event_metrics)
 
@@ -174,13 +172,13 @@ def eval_one_group(area_name: str, identifier: str, val_group: int):
 
     # ---------- make model ----------
     print('Creating model...')
-    model = FSRGNN(**model_config)
+    model = FSRGNN(**model_config, feat_stats_file=get_feature_stats_filepath(area_name, val_group))
     model.init_static_features(test_dataset.STATIC_FEATURES_PATH)
     model.to(DEVICE)
     model.load_state_dict(model_state_dict)
     model.eval()
 
-    wet_idx = test_dataset.wet_idx.to(DEVICE)
+    wet_idx = torch.from_numpy(get_wet_idx(area_name=area_name, val_group=val_group)).long().to(DEVICE)
 
     all_y_pred = []
     all_y_t = []
@@ -196,11 +194,11 @@ def eval_one_group(area_name: str, identifier: str, val_group: int):
             with torch.autocast(device_type='cuda', dtype=torch.bfloat16):
                 y_residual_pred = model(
                     lf_wd = batch.lf_dyn_node,
-                    ups_wd = batch.ups_dyn_node,
+                    ups_wd = batch.ups_wd,
                     batch_size = batch.num_graphs
                 )
 
-            y_pred = torch.clamp(batch.upsampled_water_depth + y_residual_pred.float(), min=0.0)
+            y_pred = torch.clamp(batch.ups_wd + y_residual_pred.float(), min=0.0)
             y_t = batch.hf_water_depth
 
             # unbatch into 2D shape and filter
@@ -407,8 +405,11 @@ def read_stats(area_name: str, identifier: str, val_group: int):
 
 if __name__ == '__main__':
     print('---------- Evaluating ----------')
-    # visualise_loss_curves(area_name='Carlisle', identifier='2026-10-09', val_group=1)
-    # eval_one_event(area_name='Carlisle', identifier='2026-10-09', event_idx=0, plot_upsampled=True)
+    # read_stats('Carlisle', '2026-10-16', 1)
+    # eval_upsampled_one_event(area_name='Carlisle', event_idx=0)
+    # visualise_loss_curves(area_name='Carlisle', identifier='2026-10-17', val_group=1)
+    eval_one_event(area_name='Carlisle', identifier='2026-10-16', event_idx=0, plot_upsampled=True)
+    eval_one_event(area_name='Carlisle', identifier='2026-10-17', event_idx=0, plot_upsampled=True)
     # visualise_loss_curves(area_name='Chowilla', identifier='2026-10-09', val_group=1)
     # eval_one_event(area_name='Chowilla', identifier='2026-10-09', event_idx=0, plot_upsampled=True)
     # visualise_loss_curves(area_name='BurnettRV', identifier='2026-10-09', val_group=1)
@@ -422,17 +423,17 @@ if __name__ == '__main__':
     # 2: LSTM-SRR
     # 3: GP-EOF
     # 4: LSTM-EOF
-    np.set_printoptions(precision=4, suppress=True)
-    lsg_results = np.load(f'../dataset/BurnettRV/Result_data/Validation_results.npz')
-    lsg_csi = lsg_results['CSI'][:, 0]
-    lsg_max_wd_r2 = lsg_results['MaxWD_R2'][:, 0]
-    lsg_peak_diff = lsg_results['peak_diff'][:, 0]
-    lsg_rmse = lsg_results['RMSE'][:, 0]
-    lsg_fi = lsg_results['FI'][:, 0]
-    print(f'----- LSG model evaluation metrics: -----')
-    print(f'CSI: {lsg_csi}')
-    print(f'Max WD R2: {lsg_max_wd_r2}')
-    print(f'Peak diff: {lsg_peak_diff}')
-    print(f'RMSE: {lsg_rmse}')
-    print(f'FI: {lsg_fi}')
+    # np.set_printoptions(precision=4, suppress=True)
+    # lsg_results = np.load(f'../dataset/BurnettRV/Result_data/Validation_results.npz')
+    # lsg_csi = lsg_results['CSI'][:, 0]
+    # lsg_max_wd_r2 = lsg_results['MaxWD_R2'][:, 0]
+    # lsg_peak_diff = lsg_results['peak_diff'][:, 0]
+    # lsg_rmse = lsg_results['RMSE'][:, 0]
+    # lsg_fi = lsg_results['FI'][:, 0]
+    # print(f'----- LSG model evaluation metrics: -----')
+    # print(f'CSI: {lsg_csi}')
+    # print(f'Max WD R2: {lsg_max_wd_r2}')
+    # print(f'Peak diff: {lsg_peak_diff}')
+    # print(f'RMSE: {lsg_rmse}')
+    # print(f'FI: {lsg_fi}')
 

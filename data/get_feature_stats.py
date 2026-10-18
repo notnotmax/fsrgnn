@@ -5,9 +5,8 @@ Part of preprocessing.
 """
 
 import numpy as np
-import os
-import pandas as pd
-from utils import get_event_summary, get_train_test_indices, get_wet_idx
+from utils import get_event_summary, get_train_test_indices, get_lf_dyn_node_filepath, get_ups_wd_filepath, \
+        get_feature_stats_filepath
 
 
 def get_feature_stats(area_name: str, val_group: int):
@@ -33,9 +32,9 @@ def get_feature_stats(area_name: str, val_group: int):
         else:
             raise NotImplementedError
         
-        lf_water_depth = np.load(f'data/{area_name}/processed/lf_dyn_node_event_{event_id}.npy', mmap_mode='r')
+        lf_water_depth = np.load(get_lf_dyn_node_filepath(area_name, event_id), mmap_mode='r')
         lf_water_depths.append(lf_water_depth)
-        ups_water_depth = np.load(f'data/{area_name}/processed/ups_dyn_node_event_{event_id}.npy', mmap_mode='r')
+        ups_water_depth = np.load(get_ups_wd_filepath(area_name, event_id), mmap_mode='r')
         ups_water_depths.append(ups_water_depth)
 
     expected_timesteps = idx_train.shape[0] + idx_test.shape[0]
@@ -56,7 +55,7 @@ def get_feature_stats(area_name: str, val_group: int):
         f'ups wd std: {ups_wd_std}',
     )
 
-    output_path = f'data/{area_name}/feature_stats_fold_{val_group}.npz'
+    output_path = get_feature_stats_filepath(area_name, val_group)
     np.savez_compressed(
         output_path,
         lf_wd_mean=lf_wd_mean,
@@ -103,7 +102,7 @@ def _get_percentiles(area_name: str):
             event_id = event_summary['No'][event_idx]
         else:
             raise NotImplementedError
-        lf_wd = np.load(f'data/{area_name}/processed/lf_dyn_node_event_{event_id}.npy', mmap_mode='r')
+        lf_wd = np.load(get_lf_dyn_node_filepath(area_name, event_id), mmap_mode='r')
         print(f'Event {event_id}: 99: {np.percentile(lf_wd, 99):.3f}, 99.9: {np.percentile(lf_wd, 99.9):.3f},',
             f'99.99: {np.percentile(lf_wd, 99.99):.3f}, max: {np.max(lf_wd):.3f}')
         
