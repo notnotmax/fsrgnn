@@ -258,7 +258,7 @@ def _get_all_event_timesteps_burnett():
         print('HF timesteps', hf_timesteps.shape)
 
 if __name__ == '__main__':
-    AREA_NAME = 'Carlisle'
+    AREA_NAME = 'BurnettRV'
     print(f'Processing {AREA_NAME} dataset.')
     dataset = make_dataset_all_events(area_name=AREA_NAME)
     dataset.process_all()

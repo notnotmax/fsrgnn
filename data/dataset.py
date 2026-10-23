@@ -9,6 +9,7 @@ from scipy.spatial import KDTree
 from torch_geometric.data import Data, Dataset
 from utils import get_lf_dyn_node_filepath, get_ups_wd_filepath, get_hf_wd_filepath, get_static_features_filepath
 
+# derived from rounding the maximum (across events) of the 99.99th percentiles of pre-clamp preprocessed water depths 
 DEPTH_CAP = {'Carlisle': 9.0, 'Chowilla': 15.0, 'BurnettRV': 27.0}
 
 class FloodEventDataset(Dataset):
@@ -99,8 +100,7 @@ class FloodEventDataset(Dataset):
         hf_static_node_features = self._get_hf_static_node_features()
         hf_static_edge_features = self._get_hf_static_edge_features()
         
-        save_path = os.path.join(self.processed_dir, self.STATIC_FEATURES_FILE)
-        np.savez(save_path,
+        np.savez(self.STATIC_FEATURES_PATH,
                  lf_coords = lf_geom['cell_coordinates'],
                  lf_edge_index = lf_geom['edge_index'],
                  lf_static_node_features = lf_static_node_features,
@@ -109,7 +109,7 @@ class FloodEventDataset(Dataset):
                  hf_edge_index = hf_geom['edge_index'],
                  hf_static_node_features = hf_static_node_features,
                  hf_static_edge_features = hf_static_edge_features)
-        print(f'Saved constant values to {save_path}')
+        print(f'Saved constant values to {self.STATIC_FEATURES_PATH}')
         del lf_geom, lf_static_node_features, lf_static_edge_features, hf_geom, hf_static_node_features, hf_static_edge_features
 
         # ----- create dynamic files -----

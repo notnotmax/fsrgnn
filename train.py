@@ -16,7 +16,6 @@ from data.make_dataset import make_dataset_one_group
 from utils import get_feature_stats_filepath, get_train_test_indices, get_wet_idx
 
 
-
 def set_seed(seed: int):
     random.seed(seed)
     np.random.seed(seed)
@@ -38,6 +37,10 @@ def train(area_name: str, mode: str, identifier: str, val_group: int, epochs_to_
 
     os.makedirs(CHECKPOINT_DIR, exist_ok=True)
     set_seed(seed)
+
+    # ==============================
+    # config and checkpoint loading
+    # ==============================
 
     if mode == 'new':
         print(f'Training new model on {area_name} on validation group {val_group} using config {CONFIG_PATH}.')
@@ -61,7 +64,9 @@ def train(area_name: str, mode: str, identifier: str, val_group: int, epochs_to_
             'loss_func': loss_func_name,
             'epoch': [],
             'train_loss': [],
-            'val_loss': []
+            'train_loss_components': {},
+            'val_loss': [],
+            'val_loss_components': {}
         }
 
     elif mode == 'continue':
@@ -80,34 +85,44 @@ def train(area_name: str, mode: str, identifier: str, val_group: int, epochs_to_
             min_lr = config['min_lr']
             t_interval = config['t_interval']
 
-        checkpoint = torch.load(LATEST_CHECKPOINT_PATH, map_location=DEVICE, weights_only=False)
+        checkpoint = torch.load(LATEST_CHECKPOINT_PATH, map_location='cpu', weights_only=False)
         start_epoch = checkpoint['epoch'] + 1
         best_val_loss = checkpoint['best_val_loss']
         model_state_dict = checkpoint['model_state_dict']
         optimiser_state_dict = checkpoint['optimiser_state_dict']
         scheduler_state_dict = checkpoint['scheduler_state_dict']
+        random_state = checkpoint['random_state']
 
         with open(LOSS_STATS_PATH, 'r') as f:
             loss_stats = json.load(f)
+            assert loss_stats['loss_func'] == loss_func_name, \
+                f'Loss function mismatch between config ({loss_stats['loss_func']}) and checkpoint ({loss_func_name}).'
         
     else:
-        assert False, f'Unknown training mode: {mode}, should be "new" or "continue"'
+        raise Exception(f'Unknown training mode: {mode}, should be "new" or "continue".')
 
-    # ---------- prep datasets/loaders ----------
+    # ==============================
+    # create dataset and dataloaders
+    # ==============================
+
     dataset = make_dataset_one_group(area_name=area_name, val_group=val_group, mode='train')
+    wet_idx = torch.from_numpy(get_wet_idx(area_name=area_name, val_group=val_group)).long().to(DEVICE)
     idx_train, idx_val = get_train_test_indices(area_name=area_name, val_group=val_group)
-    assert idx_train.shape[0] + idx_val.shape[0] == len(dataset)
+    assert idx_train.shape[0] + idx_val.shape[0] == len(dataset), \
+        f'Dataset size {len(dataset)} does not match number of indices {idx_train.shape[0] + idx_val.shape[0]} in train-test split.'
 
     # optionally filter indices to only use every <t_interval> timesteps from each event
-    event_ends = np.cumsum(np.asarray(dataset.num_timesteps, dtype=np.int32))
-    idx_train = filter_timesteps(idx_train, event_ends, t_interval)
-    idx_val = filter_timesteps(idx_val, event_ends, t_interval)
+    assert t_interval >= 1, f'Invalid t_interval of {t_interval}, should be >=1.'
+    if t_interval > 1:
+        event_ends = np.cumsum(np.asarray(dataset.num_timesteps, dtype=np.int32))
+        idx_train = filter_timesteps(idx_train, event_ends, t_interval)
+        idx_val = filter_timesteps(idx_val, event_ends, t_interval)
     print(f'----- Using timestep interval {t_interval}: Training samples: {idx_train.shape}, Validation samples: {idx_val.shape} -----')
 
     train_dataset = Subset(dataset, idx_train)
     val_dataset = Subset(dataset, idx_val)
-    g = torch.Generator()
-    g.manual_seed(seed)
+    generator = torch.Generator()
+    generator.manual_seed(seed)
     train_loader = DataLoader(
         train_dataset,
         batch_size=batch_size,
@@ -115,7 +130,7 @@ def train(area_name: str, mode: str, identifier: str, val_group: int, epochs_to_
         num_workers=4,
         persistent_workers=True,
         pin_memory=True,
-        generator=g)
+        generator=generator)
     val_loader = DataLoader(
         val_dataset,
         batch_size=batch_size,
@@ -124,10 +139,10 @@ def train(area_name: str, mode: str, identifier: str, val_group: int, epochs_to_
         persistent_workers=True,
         pin_memory=True)
 
-    # constants for this fold/validation group
-    wet_idx = torch.from_numpy(get_wet_idx(area_name=area_name, val_group=val_group)).long().to(DEVICE)
+    # ==============================
+    # create model, loss, optimiser and scheduler
+    # ==============================
 
-    # ---------- make model ----------
     print('Creating model...')
     model = FSRGNN(**model_config, feat_stats_file=get_feature_stats_filepath(area_name, val_group))
     model.init_static_features(dataset.STATIC_FEATURES_PATH)
@@ -139,24 +154,46 @@ def train(area_name: str, mode: str, identifier: str, val_group: int, epochs_to_
 
     if loss_func_name == 'mse':
         loss_func = nn.MSELoss()
+        loss_component_keys = {'mse'}
     elif loss_func_name == 'mse_bce':
         loss_func = MSEBCELoss(**loss_config)
+        loss_component_keys = loss_func.LOSS_COMPONENT_KEYS
     else:
-        raise NotImplementedError
+        raise Exception(f'Unknown loss function {loss_func_name}.')
 
-    if mode == 'continue':
+    if mode == 'new':
+        for key in loss_component_keys:
+            loss_stats['train_loss_components'][key] = []
+            loss_stats['val_loss_components'][key] = []
+
+    elif mode == 'continue':
+        for key in loss_component_keys:
+            assert key in loss_stats['train_loss_components'], f'Loss component {key} not found in loss stats file.'
+            assert key in loss_stats['val_loss_components'], f'Loss component {key} not found in loss stats file.'
+
         model.load_state_dict(model_state_dict)
         optimiser.load_state_dict(optimiser_state_dict)
         scheduler.load_state_dict(scheduler_state_dict)
+        random.setstate(random_state['python'])
+        np.random.set_state(random_state['numpy'])
+        torch.set_rng_state(random_state['torch'])
+        torch.cuda.set_rng_state_all(random_state['cuda'])
+        generator.set_state(random_state['generator'])
 
-    # ---------- training/validation loops ----------
+    # ==============================
+    # training and validation loops
+    # ==============================
+
     print('Starting training...')
     
     for epoch in range(start_epoch, start_epoch + NUM_EPOCHS):
 
-        # training loop
+        # ----- training loop -----
         model.train()
         total_train_loss = 0.0
+        total_train_loss_components = {
+            key: 0.0 for key in loss_component_keys
+        }
         for batch in train_loader:
             batch = batch.to(DEVICE)
             optimiser.zero_grad()
@@ -167,7 +204,7 @@ def train(area_name: str, mode: str, identifier: str, val_group: int, epochs_to_
                     batch_size = batch.num_graphs
                 )
             y_pred = batch.ups_wd + y_residual_pred.float()
-            loss = masked_loss(
+            train_loss, train_loss_components = masked_loss(
                 y_t = batch.hf_wd,
                 y_pred = y_pred,
                 num_graphs = batch.num_graphs,
@@ -175,14 +212,18 @@ def train(area_name: str, mode: str, identifier: str, val_group: int, epochs_to_
                 wet_idx = wet_idx,
                 loss_func = loss_func
             )
-            loss.backward()
+            train_loss.backward()
             optimiser.step()
-            total_train_loss += loss.detach()
-        avg_train_loss = (total_train_loss / len(train_loader)).item()
+            total_train_loss += train_loss.detach()
+            for key in loss_component_keys:
+                total_train_loss_components[key] += train_loss_components[key]
 
-        # validation loop
+        # ----- validation loop -----
         model.eval()
         total_val_loss = 0.0
+        total_val_loss_components = {
+            key: 0.0 for key in loss_component_keys
+        }
         with torch.inference_mode():
             for batch in val_loader:
                 batch = batch.to(DEVICE)
@@ -193,7 +234,7 @@ def train(area_name: str, mode: str, identifier: str, val_group: int, epochs_to_
                         batch_size = batch.num_graphs
                     )
                 y_pred = batch.ups_wd + y_residual_pred.float()
-                val_loss = masked_loss(
+                val_loss, val_loss_components = masked_loss(
                     y_t = batch.hf_wd,
                     y_pred = y_pred,
                     num_graphs = batch.num_graphs,
@@ -202,17 +243,34 @@ def train(area_name: str, mode: str, identifier: str, val_group: int, epochs_to_
                     loss_func = loss_func
                 )
                 total_val_loss += val_loss.detach()
-            avg_val_loss = (total_val_loss / len(val_loader)).item()
+                for key in loss_component_keys:
+                    total_val_loss_components[key] += val_loss_components[key]
+            
+        # ---------- save loss metrics ----------
+
+        avg_train_loss = (total_train_loss / len(train_loader)).item()
+        avg_train_loss_components = {
+            k: (v / len(train_loader)).item()
+            for k, v in total_train_loss_components.items()
+        }
+
+        avg_val_loss = (total_val_loss / len(val_loader)).item()
+        avg_val_loss_components = {
+            k: (v / len(val_loader)).item()
+            for k, v in total_val_loss_components.items()
+        }
 
         scheduler.step(avg_val_loss)
-        print(f'Epoch {epoch}, Train loss {avg_train_loss:.6f}, Validation loss {avg_val_loss:.6f}')
-
         loss_stats['epoch'].append(epoch)
         loss_stats['train_loss'].append(avg_train_loss)
         loss_stats['val_loss'].append(avg_val_loss)
+        for key in loss_component_keys:
+            loss_stats['train_loss_components'][key].append(avg_train_loss_components[key])
+            loss_stats['val_loss_components'][key].append(avg_val_loss_components[key])
         
         with open(LOSS_STATS_PATH, 'w') as f:
             json.dump(loss_stats, f, indent=4)
+        print(f'Epoch {epoch}, Train loss {avg_train_loss:.6f}, Validation loss {avg_val_loss:.6f}')
 
         # ---------- checkpointing ----------
 
@@ -227,28 +285,38 @@ def train(area_name: str, mode: str, identifier: str, val_group: int, epochs_to_
             torch.save(best_checkpoint, BEST_CHECKPOINT_PATH)
             print(f'Saved new best model checkpoint at epoch {epoch}.')
 
-        # always save latest model to use when resuming training
         latest_checkpoint = {
             'epoch': epoch,
             'best_val_loss': best_val_loss,
             'model_config': model_config,
             'model_state_dict': model.state_dict(),
             'optimiser_state_dict': optimiser.state_dict(),
-            'scheduler_state_dict': scheduler.state_dict()
+            'scheduler_state_dict': scheduler.state_dict(),
+            'random_state': {
+                'python': random.getstate(),
+                'numpy': np.random.get_state(),
+                'torch': torch.get_rng_state(),
+                'cuda': torch.cuda.get_rng_state_all(),
+                'generator': generator.get_state()
+            }
         }
         torch.save(latest_checkpoint, LATEST_CHECKPOINT_PATH)
 
 
 def masked_loss(y_t, y_pred, num_graphs, num_hf_nodes, wet_idx, loss_func):
-    # unbatch into 2D shape
     y_pred_grid = y_pred.view(num_graphs, num_hf_nodes)
     y_t_grid = y_t.view(num_graphs, num_hf_nodes)
 
-    # filter
     y_pred_grid = y_pred_grid[:, wet_idx]
     y_t_grid = y_t_grid[:, wet_idx]
 
-    return loss_func(y_pred_grid, y_t_grid)
+    loss = loss_func(y_pred_grid, y_t_grid)
+    if isinstance(loss, tuple):
+        total_loss, loss_components = loss[0], loss[1]
+    else: # for MSE loss only
+        total_loss, loss_components = loss, {'mse': loss.detach()}
+
+    return total_loss, loss_components
 
 
 def filter_timesteps(indices, event_ends, t_interval):
@@ -263,9 +331,5 @@ def filter_timesteps(indices, event_ends, t_interval):
 
 
 if __name__ == '__main__':
-    print('----- Carlisle, with MSE-BCE loss -----')
-    train(area_name='Carlisle', mode='continue', identifier='2026-10-17e', val_group=1, epochs_to_do=50, seed=42)
-    # print('----- Chowilla, t=2, 6-layer GNNs new model -----')
-    # train(area_name='Chowilla', mode='new', identifier='2026-10-09', val_group=1, epochs_to_do=50, seed=42)
-    # print('----- BurnettRV, t=8, 6-layer GNNs -----')
-    # train(area_name='BurnettRV', mode='new', identifier='2026-10-09', val_group=1, epochs_to_do=50, seed=42)
+    print('----- Burnett, with MSE-BCE loss -----')
+    train(area_name='BurnettRV', mode='new', identifier='2026-10-20b', val_group=1, epochs_to_do=100, seed=42)

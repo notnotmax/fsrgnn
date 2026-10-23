@@ -11,6 +11,7 @@ class MSEBCELoss(nn.Module):
         self.soft_targets = soft_targets
         self.mse = nn.MSELoss()
         self.bce = nn.BCEWithLogitsLoss()
+        self.LOSS_COMPONENT_KEYS = {'mse', 'bce'}
 
     def forward(self, y_pred, y_t):
         mse = self.mse(y_pred, y_t)
@@ -20,7 +21,11 @@ class MSEBCELoss(nn.Module):
         else:
             target = (y_t > self.wet_threshold).float()
         bce = self.bce(logits, target)
-        return mse + self.alpha * bce
+        loss_dict = {
+            'mse': mse.detach(),
+            'bce': bce.detach()
+        }
+        return mse + self.alpha * bce, loss_dict
 
 
 class HuberBCELoss(nn.Module):
@@ -33,6 +38,7 @@ class HuberBCELoss(nn.Module):
         self.soft_targets = soft_targets
         self.huber = nn.HuberLoss(delta=delta)
         self.bce = nn.BCEWithLogitsLoss()
+        self.LOSS_COMPONENT_KEYS = {'huber', 'bce'}
 
     def forward(self, y_pred, y_t):
         huber = self.huber(y_pred, y_t)
@@ -42,5 +48,9 @@ class HuberBCELoss(nn.Module):
         else:
             target = (y_t > self.wet_threshold).float()
         bce = self.bce(logits, target)
-        return huber + self.alpha * bce
+        loss_dict = {
+            'huber': huber.detach(),
+            'bce': bce.detach()
+        }
+        return huber + self.alpha * bce, loss_dict
     

@@ -5,7 +5,7 @@ import pandas as pd
 import torch
 
 from data.make_dataset import make_dataset_one_event, make_dataset_one_group
-from data.visuals import plot_line
+from visuals import plot_line
 from model.fsrgnn import FSRGNN
 from sklearn.metrics import r2_score
 from torch_geometric.loader import DataLoader
@@ -123,7 +123,7 @@ def eval_one_event(area_name: str, identifier: str, event_idx: int, plot_upsampl
     pred_wd = np.concatenate(all_y_pred, axis=0)
 
     np.save(f'model/{area_name}/{identifier}_Ev_1_pred_wd.npy', pred_wd.astype(np.float32))
-    return
+    # TODO
 
     event_lengths = np.asarray(test_dataset.num_timesteps, dtype=np.int32)
 
@@ -369,7 +369,7 @@ def fidelity_index(true, pred, wd_tol=0.05, time_tol=0.05, time_tol_as_timesteps
 
 # ---------- visualisation functions ----------
 
-def visualise_loss_curves(area_name: str, identifier: str, val_group: int):
+def visualise_loss_curves(area_name: str, identifier: str, val_group: int, plot_loss_components: bool = False):
     JSON_PATH = f'model/{area_name}/{identifier}_Val_{val_group}_loss_stats.json'
     IMG_PATH = f'model/{area_name}/{identifier}_Val_{val_group}_loss_curves.png'
 
@@ -378,20 +378,32 @@ def visualise_loss_curves(area_name: str, identifier: str, val_group: int):
         epochs = loss_stats['epoch']
         train_loss = loss_stats['train_loss']
         val_loss = loss_stats['val_loss']
-    
-    plt.figure(figsize=(8, 5))
-    plt.plot(epochs, train_loss, label='Train')
-    plt.plot(epochs, val_loss, label='Validation')
-    plt.title('Loss Curves')
-    plt.xlabel('Epoch')
-    plt.ylabel('MSE Loss')
-    # plt.ylim(0.02, 0.07) # loss axis
-    plt.legend(frameon=True, loc='upper right')
-    plt.tight_layout()
+        train_loss_components = None
+        val_loss_components = None
+        if 'train_loss_components' in loss_stats:
+            train_loss_components = loss_stats['train_loss_components']
+        if 'val_loss_components' in loss_stats:
+            val_loss_components = loss_stats['val_loss_components']
 
-    plt.savefig(IMG_PATH, dpi=300)
-    print(f'Created loss curve image for {JSON_PATH}.')
-    plt.close()
+    loss_values = {
+        'Train': train_loss,
+        'Validation': val_loss,
+    }
+
+    if plot_loss_components:
+        assert train_loss_components.keys() == val_loss_components.keys(), \
+            'Different loss components for training and validation loss. Check if this is intentional.'
+        for k, v in train_loss_components.items():
+            if k == 'bce':
+                v = [x * 0.05 for x in v]
+            loss_values[f'Train ({k})'] = v
+        for k, v in val_loss_components.items():
+            if k == 'bce':
+                v = [x * 0.05 for x in v]
+            loss_values[f'Val ({k})'] = v
+
+    plot_line(epochs, loss_values, title=f'Loss Curves (model {identifier}, {area_name} fold {val_group})', \
+        xlabel='Epoch', ylabel='Loss', output_path=IMG_PATH)
 
 
 def read_stats(area_name: str, identifier: str, val_group: int):
@@ -405,13 +417,9 @@ def read_stats(area_name: str, identifier: str, val_group: int):
 
 if __name__ == '__main__':
     print('---------- Evaluating ----------')
-    # read_stats('Carlisle', '2026-10-16', 1)
-    # eval_upsampled_one_event(area_name='Carlisle', event_idx=0)
-    # visualise_loss_curves(area_name='Carlisle', identifier='2026-10-17', val_group=1)
-    eval_one_event(area_name='Carlisle', identifier='2026-10-16', event_idx=0, plot_upsampled=True)
-    eval_one_event(area_name='Carlisle', identifier='2026-10-17', event_idx=0, plot_upsampled=True)
-    # visualise_loss_curves(area_name='Chowilla', identifier='2026-10-09', val_group=1)
-    # eval_one_event(area_name='Chowilla', identifier='2026-10-09', event_idx=0, plot_upsampled=True)
+    # visualise_loss_curves(area_name='Chowilla', identifier='2026-10-20', val_group=1, plot_loss_components=True)
+    eval_upsampled_one_event(area_name='Chowilla', event_idx=0)
+    eval_one_event(area_name='Chowilla', identifier='2026-10-20', event_idx=0, plot_upsampled=True)
     # visualise_loss_curves(area_name='BurnettRV', identifier='2026-10-09', val_group=1)
     # eval_one_event(area_name='BurnettRV', identifier='2026-10-09', event_idx=0, plot_upsampled=True)
     # eval_upsampled('BurnettRV')
